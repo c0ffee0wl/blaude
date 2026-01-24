@@ -169,7 +169,7 @@ bwrap_args=(
     # Note: --new-session removed to allow proper signal propagation for MCP servers
     # and background tasks. PID namespace provides equivalent process isolation.
     # Namespace isolation
-    --unshare-pid --unshare-ipc --unshare-cgroup --unshare-uts
+    --unshare-pid --unshare-ipc --unshare-uts
     --hostname blaude
 )
 
