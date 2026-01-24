@@ -1,0 +1,437 @@
+#!/bin/bash
+# blaude - Run Claude Code in a bubblewrap sandbox
+
+show_help() {
+    cat << 'EOF'
+blaude - Run Claude Code in a bubblewrap sandbox
+
+Usage: blaude [OPTIONS] [--] [COMMAND...]
+
+Options:
+  -e KEY=VALUE    Set environment variable in sandbox (can be used multiple times)
+  -m, --mount PATH  Mount additional directory (repeatable)
+                    Append :rw for read-write (default is read-only)
+  -p, --prompt PROMPT  Run claude with -p (prompt mode)
+  --no-network    Disable network access (breaks Claude Code API calls)
+  --git           Mount git config (~/.gitconfig and credentials) for committing
+  --ssh           Mount SSH keys and forward SSH agent for GitHub auth
+  --tmp           Run isolated (no workspace mount, workdir /tmp)
+  -v, --verbose   Display bwrap command before executing
+  --dry-run       Show bwrap command without executing (implies --verbose)
+  -h, --help      Show this help message
+
+Arguments after -- are passed to claude if they start with -, otherwise as the command.
+
+Examples:
+  blaude                          Run claude --dangerously-skip-permissions (default)
+  blaude -e API_KEY=xxx           Start with environment variable
+  blaude -m ~/projects/lib        Mount ~/projects/lib read-only
+  blaude -m ~/projects/lib:rw     Mount read-write instead of read-only
+  blaude -m ~/p1 -m ~/p2          Mount multiple directories
+  blaude --no-network             Start without network access
+  blaude --git                    Enable git commits from inside sandbox
+  blaude --ssh                    Enable SSH auth for GitHub (plugins, git)
+  blaude -- --resume              Resume a conversation (shows picker)
+  blaude -- --resume last         Resume the last conversation
+  blaude -- -c                    Continue the most recent conversation
+  blaude -- bash                  Run bash instead of claude
+  blaude -p "say hello"           Prompt mode
+
+The current directory is mounted at /workspaces/<dirname>.
+~/.claude is mounted read-write for config persistence.
+Only ~/.local/bin and ~/.local/share/claude are exposed from home (read-only).
+
+LLM API environment variables are automatically passed through if set:
+  ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL (for proxy/router), OPENAI_API_KEY,
+  AZURE_OPENAI_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY, MISTRAL_API_KEY,
+  GROQ_API_KEY, and others (AWS, HuggingFace, etc.)
+
+Prerequisites:
+  - bubblewrap installed (apt install bubblewrap / dnf install bubblewrap)
+  - claude installed at ~/.local/bin/claude
+EOF
+}
+
+# Check for bwrap
+if ! command -v bwrap &>/dev/null; then
+    echo "Error: bubblewrap (bwrap) is not installed" >&2
+    echo "Install with: apt install bubblewrap  OR  dnf install bubblewrap" >&2
+    exit 1
+fi
+
+# Check for claude and get its actual path
+claude_path=$(command -v claude)
+if [[ -z "$claude_path" ]]; then
+    echo "Error: claude is not installed or not in PATH" >&2
+    echo "Install from: https://docs.anthropic.com/en/docs/claude-code" >&2
+    exit 1
+fi
+# Resolve symlinks to get the real path
+claude_real_path=$(readlink -f "$claude_path")
+
+current_dir=$(pwd)
+dir_name=$(basename "$current_dir")
+# Sanitize directory name (colons can cause issues in some contexts)
+safe_dir_name="${dir_name//:/-}"
+
+env_args=()
+mount_args=()
+prompt_arg=""
+command_args=()
+tmp_mode=false
+no_network=false
+git_mode=false
+ssh_mode=false
+verbose=false
+dry_run=false
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -e)
+            env_args+=("$2")
+            shift 2
+            ;;
+        -m|--mount)
+            mount_args+=("$2")
+            shift 2
+            ;;
+        -p|--prompt)
+            prompt_arg="$2"
+            shift 2
+            ;;
+        --no-network)
+            no_network=true
+            shift
+            ;;
+        --git)
+            git_mode=true
+            shift
+            ;;
+        --ssh)
+            ssh_mode=true
+            shift
+            ;;
+        --tmp)
+            tmp_mode=true
+            shift
+            ;;
+        -v|--verbose)
+            verbose=true
+            shift
+            ;;
+        --dry-run)
+            dry_run=true
+            verbose=true
+            shift
+            ;;
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        --)
+            shift
+            command_args=("$@")
+            break
+            ;;
+        -*)
+            echo "Error: Unknown option '$1'" >&2
+            echo "Run 'blaude --help' for usage information" >&2
+            exit 1
+            ;;
+        *)
+            command_args+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# --- Ensure Claude config has required flags ---
+
+config_file="$HOME/.claude/.claude.json"
+required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}'
+
+mkdir -p "$HOME/.claude"
+if [[ -f "$config_file" ]]; then
+    # Merge required flags into existing config (requires jq)
+    if command -v jq &>/dev/null; then
+        jq -s '.[0] * .[1]' "$config_file" <(echo "$required_flags") > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
+    fi
+else
+    echo "$required_flags" > "$config_file"
+fi
+
+# --- Build bwrap command ---
+
+bwrap_args=(
+    # Lifecycle & security
+    --die-with-parent
+    --cap-drop ALL
+    # Note: --new-session removed to allow proper signal propagation for MCP servers
+    # and background tasks. PID namespace provides equivalent process isolation.
+    # Namespace isolation
+    --unshare-pid --unshare-ipc --unshare-cgroup --unshare-uts
+    --hostname blaude
+)
+
+# User namespace: run as non-root inside sandbox (required for --dangerously-skip-permissions)
+# This maps the current user to UID 1000 inside the sandbox
+if [[ $(id -u) -eq 0 ]]; then
+    # Running as root: create user namespace and become non-root inside
+    bwrap_args+=(--unshare-user --uid 1000 --gid 1000)
+else
+    # Non-root: still use user namespace for isolation, keep same UID
+    bwrap_args+=(--unshare-user --uid "$(id -u)" --gid "$(id -g)")
+fi
+
+# System mounts (read-only)
+bwrap_args+=(--ro-bind /usr /usr)
+[[ -d /lib ]] && bwrap_args+=(--ro-bind /lib /lib)
+[[ -d /lib64 ]] && bwrap_args+=(--ro-bind /lib64 /lib64)
+[[ -d /lib32 ]] && bwrap_args+=(--ro-bind /lib32 /lib32)
+bwrap_args+=(--ro-bind /bin /bin)
+[[ -d /sbin ]] && bwrap_args+=(--ro-bind /sbin /sbin)
+bwrap_args+=(--ro-bind /etc /etc)
+# /usr/share is already included via /usr, but ensure it's accessible for tools needing
+# terminfo, locales, ca-certificates, etc.
+
+# Writable overlay for pyenv shims (pyenv init tries to write here)
+if [[ -d /usr/share/pyenv/shims ]]; then
+    bwrap_args+=(--tmpfs /usr/share/pyenv/shims)
+fi
+
+# Determine sandbox UID for paths
+if [[ $(id -u) -eq 0 ]]; then
+    sandbox_uid=1000
+else
+    sandbox_uid=$(id -u)
+fi
+
+# Required filesystems
+bwrap_args+=(
+    --dev /dev
+    --proc /proc
+    --tmpfs /tmp
+    --tmpfs /var
+    --tmpfs /run
+    --dir "/run/user/$sandbox_uid"
+)
+
+# Minimal home exposure (only what claude needs)
+# Create home directory structure with writable areas for package managers
+bwrap_args+=(--tmpfs "$HOME")
+bwrap_args+=(--dir "$HOME/.local")
+bwrap_args+=(--dir "$HOME/.local/bin")
+bwrap_args+=(--dir "$HOME/.local/share")
+bwrap_args+=(--dir "$HOME/.local/lib")
+
+# Writable directories for package managers (ephemeral - cleared on exit)
+# All of ~/.local/share is writable for tools that need it (uv, pip, npm, etc.)
+# ~/.cache is writable for build caches
+# ~/go, ~/.cargo, ~/.npm for language-specific package managers
+bwrap_args+=(
+    --dir "$HOME/.cache"
+    --dir "$HOME/go"
+    --dir "$HOME/go/bin"
+    --dir "$HOME/go/pkg"
+    --dir "$HOME/.cargo"
+    --dir "$HOME/.cargo/bin"
+    --dir "$HOME/.cargo/registry"
+    --dir "$HOME/.npm"
+    --dir "$HOME/.npm/_cacache"
+)
+
+# Bind host's user binaries and their backing virtual environments
+# Many tools in ~/.local/bin are symlinks to pipx/uv venvs
+bwrap_args+=(--dir /opt)
+
+if [[ -d "$HOME/.local/bin" ]]; then
+    bwrap_args+=(--dir /opt/host-bin)
+    bwrap_args+=(--ro-bind "$HOME/.local/bin" /opt/host-bin)
+fi
+
+# Bind claude binary to its expected location (Claude Code checks for itself there)
+if [[ -e "$HOME/.local/bin/claude" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.local/bin/claude" "$HOME/.local/bin/claude")
+fi
+
+# Bind pipx virtual environments (symlink targets for pipx-installed tools)
+if [[ -d "$HOME/.local/share/pipx" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.local/share/pipx" "$HOME/.local/share/pipx")
+fi
+
+# Note: ~/.local/share/uv is left writable for ephemeral uv tool installs
+# Host's uv binary typically comes from pipx, not from ~/.local/share/uv
+
+# Bind host's cargo bin if it exists
+if [[ -d "$HOME/.cargo/bin" ]]; then
+    bwrap_args+=(--dir /opt/host-cargo-bin)
+    bwrap_args+=(--ro-bind "$HOME/.cargo/bin" /opt/host-cargo-bin)
+fi
+
+# Bind claude's data directory if it exists
+if [[ -d "$HOME/.local/share/claude" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.local/share/claude" "$HOME/.local/share/claude")
+fi
+
+# Ensure config directory exists on host and create mount point inside sandbox
+mkdir -p "$HOME/.claude"
+bwrap_args+=(--dir "$HOME/.claude")
+bwrap_args+=(--bind "$HOME/.claude" "$HOME/.claude")
+
+# Network isolation
+if [[ "$no_network" == true ]]; then
+    bwrap_args+=(--unshare-net)
+fi
+
+# Git mode: mount git configuration files
+if [[ "$git_mode" == true ]]; then
+    if [[ -f "$HOME/.gitconfig" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.gitconfig" "$HOME/.gitconfig")
+    fi
+    if [[ -f "$HOME/.git-credentials" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.git-credentials" "$HOME/.git-credentials")
+    fi
+fi
+
+# SSH mode: mount SSH keys and forward SSH agent
+if [[ "$ssh_mode" == true ]]; then
+    if [[ -d "$HOME/.ssh" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.ssh" "$HOME/.ssh")
+    fi
+    if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
+        bwrap_args+=(--bind "$SSH_AUTH_SOCK" "$SSH_AUTH_SOCK")
+    fi
+fi
+
+# Additional mount points
+for mount_spec in "${mount_args[@]}"; do
+    # Check for :rw suffix (read-write mode)
+    if [[ "$mount_spec" == *":rw" ]]; then
+        mount_mode="bind"
+        mount_spec="${mount_spec%:rw}"  # Strip :rw suffix
+    else
+        mount_mode="ro-bind"
+    fi
+
+    # Expand ~ to $HOME
+    host_path="${mount_spec/#\~/$HOME}"
+
+    if [[ ! -e "$host_path" ]]; then
+        echo "Error: Mount path does not exist: $host_path" >&2
+        exit 1
+    fi
+
+    bwrap_args+=(--$mount_mode "$host_path" "$host_path")
+done
+
+# Workspace mount
+if [[ "$tmp_mode" == true ]]; then
+    bwrap_args+=(--chdir /tmp)
+else
+    bwrap_args+=(--bind "$current_dir" "/workspaces/$safe_dir_name")
+    bwrap_args+=(--chdir "/workspaces/$safe_dir_name")
+fi
+
+# Clean environment with selective passthrough
+bwrap_args+=(--clearenv)
+bwrap_args+=(--setenv HOME "$HOME")
+bwrap_args+=(--setenv USER "${USER:-$(whoami)}")
+bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
+[[ -n "${COLORTERM:-}" ]] && bwrap_args+=(--setenv COLORTERM "$COLORTERM")
+# PATH includes:
+# 1. Ephemeral package directories (writable, for new installs)
+# 2. Host user binaries at /opt/host-* (read-only, for uv, node, etc.)
+# 3. System directories
+bwrap_args+=(--setenv PATH "$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/opt/host-bin:/opt/host-cargo-bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin")
+# Package manager environment variables
+bwrap_args+=(--setenv GOPATH "$HOME/go")
+bwrap_args+=(--setenv CARGO_HOME "$HOME/.cargo")
+bwrap_args+=(--setenv NPM_CONFIG_PREFIX "$HOME/.local")
+bwrap_args+=(--setenv LANG "${LANG:-C.UTF-8}")
+[[ -n "${LC_ALL:-}" ]] && bwrap_args+=(--setenv LC_ALL "$LC_ALL")
+[[ -n "${LC_CTYPE:-}" ]] && bwrap_args+=(--setenv LC_CTYPE "$LC_CTYPE")
+
+# SSH agent forwarding env var
+if [[ "$ssh_mode" == true && -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
+    bwrap_args+=(--setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK")
+fi
+
+# Claude Code configuration
+bwrap_args+=(
+    --setenv CLAUDE_CONFIG_DIR "$HOME/.claude"
+    --setenv DO_NOT_TRACK 1
+    --setenv DISABLE_TELEMETRY 1
+    --setenv DISABLE_AUTOUPDATER 1
+    --setenv DISABLE_ERROR_REPORTING 1
+    --setenv DISABLE_BUG_COMMAND 1
+    --setenv CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY 1
+    --setenv DISABLE_INSTALL_GITHUB_APP_COMMAND 1
+    # Disable config file watching to prevent inotify ENOSPC crashes in sandbox
+    --setenv CLAUDE_DISABLE_CONFIG_WATCH 1
+)
+
+# Auto-passthrough LLM API environment variables from host
+for var in ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_MODEL \
+           DISABLE_COST_WARNINGS \
+           OPENAI_API_KEY OPENAI_API_BASE OPENAI_ORG_ID \
+           AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION \
+           GOOGLE_API_KEY GEMINI_API_KEY \
+           MISTRAL_API_KEY COHERE_API_KEY HUGGINGFACE_API_KEY HF_TOKEN \
+           GROQ_API_KEY TOGETHER_API_KEY REPLICATE_API_TOKEN \
+           PERPLEXITY_API_KEY FIREWORKS_API_KEY DEEPSEEK_API_KEY \
+           AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_REGION AWS_DEFAULT_REGION \
+           CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLOUD_ML_REGION \
+           CLAUDE_CODE_MAX_OUTPUT_TOKENS CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC; do
+    if [[ -n "${!var:-}" ]]; then
+        bwrap_args+=(--setenv "$var" "${!var}")
+    fi
+done
+
+# User-specified environment variables
+for env_spec in "${env_args[@]}"; do
+    key="${env_spec%%=*}"
+    value="${env_spec#*=}"
+    bwrap_args+=(--setenv "$key" "$value")
+done
+
+# --- Build command ---
+
+if [[ -n "$prompt_arg" ]]; then
+    # Prompt mode: run claude -p with the provided prompt
+    bwrap_args+=(claude --dangerously-skip-permissions -p "$prompt_arg")
+elif [[ ${#command_args[@]} -eq 0 ]]; then
+    if [[ -t 0 ]]; then
+        bwrap_args+=(claude --dangerously-skip-permissions)
+    else
+        # Piped input with no command - send to claude -p
+        bwrap_args+=(claude --dangerously-skip-permissions -p)
+    fi
+else
+    # If first arg starts with -, treat as claude flags and prepend default command
+    if [[ "${command_args[0]}" == -* ]]; then
+        bwrap_args+=(claude --dangerously-skip-permissions "${command_args[@]}")
+    else
+        bwrap_args+=("${command_args[@]}")
+    fi
+fi
+
+# --- Execute ---
+
+if [[ "$verbose" == true ]]; then
+    # Print command in a way that can be copy-pasted
+    printf '\e[2mbwrap' >&2
+    for arg in "${bwrap_args[@]}"; do
+        if [[ "$arg" == *" "* || "$arg" == *"'"* ]]; then
+            printf ' "%s"' "$arg" >&2
+        else
+            printf ' %s' "$arg" >&2
+        fi
+    done
+    printf '\e[0m\n' >&2
+fi
+
+if [[ "$dry_run" == true ]]; then
+    exit 0
+fi
+
+exec bwrap "${bwrap_args[@]}"
