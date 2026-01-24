@@ -165,6 +165,7 @@ fi
 bwrap_args=(
     # Lifecycle & security
     --cap-drop ALL
+    --die-with-parent
     # Note: --new-session removed to allow proper signal propagation for MCP servers
     # and background tasks. PID namespace provides equivalent process isolation.
     # Namespace isolation
