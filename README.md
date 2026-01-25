@@ -26,6 +26,29 @@ chmod +x ~/.local/bin/blaude
 
 Requires Claude Code installed and in PATH.
 
+## Drop-in Replacement
+
+blaude is a drop-in replacement for `claude`. All arguments not recognized by blaude are passed directly to the Claude Code CLI:
+
+```bash
+# These are equivalent (but blaude runs in a sandbox)
+claude -p "hello"
+blaude -p "hello"
+
+claude --resume
+blaude --resume
+
+claude mcp list
+blaude mcp list
+```
+
+To always run Claude Code in a sandbox, add an alias to your shell config:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+alias claude=blaude
+```
+
 ## Usage
 
 ```bash
