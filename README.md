@@ -122,13 +122,22 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 
 ## Environment Variables
 
-LLM API keys are automatically passed through if set:
+All [Claude Code environment variables](https://code.claude.com/docs/en/settings) are automatically passed through if set:
 
-- `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`
-- `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`
-- `GOOGLE_API_KEY`, `GEMINI_API_KEY`
-- `AWS_*` (for Bedrock)
-- And others (Mistral, Groq, Together, etc.)
+| Category | Variables |
+|----------|-----------|
+| **Authentication** | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_FOUNDRY_*`, `AWS_BEARER_TOKEN_BEDROCK` |
+| **Model Config** | `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`, `MAX_THINKING_TOKENS`, `VERTEX_REGION_*` |
+| **Bash/Commands** | `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_*`, `CLAUDE_CODE_SHELL`, `CLAUDE_CODE_SHELL_PREFIX`, `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` |
+| **Token Limits** | `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `CLAUDE_CODE_FILE_READ_MAX_OUTPUT_TOKENS`, `MAX_MCP_OUTPUT_TOKENS` |
+| **Cloud Providers** | `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_SKIP_*_AUTH`, `AWS_*` |
+| **MCP** | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `ENABLE_TOOL_SEARCH` |
+| **UI/Display** | `CLAUDE_CODE_HIDE_ACCOUNT_INFO`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`, `IS_DEMO`, `DISABLE_COST_WARNINGS` |
+| **Advanced** | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `DISABLE_PROMPT_CACHING*`, `SLASH_COMMAND_TOOL_CHAR_BUDGET` |
+| **Proxy** | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `CLAUDE_CODE_PROXY_RESOLVES_HOSTS` |
+| **Other LLM APIs** | `OPENAI_API_KEY`, `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, etc. |
+
+Use `--env KEY=VALUE` to pass additional variables not in this list.
 
 ## License
 

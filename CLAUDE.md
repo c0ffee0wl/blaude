@@ -51,7 +51,7 @@ The script builds a complex `bwrap` command with these isolation layers:
 - Lines 93-106: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
 - Lines 110-119: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
 - Lines 251-270: Additional mount handling with `:rw` suffix parsing for read-write mounts
-- Lines 318-333: LLM API key passthrough loop - add new API keys here if needed
+- Lines 319-377: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included
 
 ## Prerequisites
 
