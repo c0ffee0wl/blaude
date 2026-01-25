@@ -32,8 +32,12 @@ Requires Claude Code installed and in PATH.
 # Run Claude Code in sandbox (current directory)
 blaude
 
-# Prompt mode
-blaude -p "explain this codebase"
+# Pass any claude options directly
+blaude -p "explain this codebase"    # prompt mode
+blaude -c                            # continue conversation
+blaude -v                            # show claude version
+blaude --resume                      # resume picker
+blaude mcp list                      # MCP commands
 
 # Mount additional directories
 blaude -m ~/shared-libs              # read-only
@@ -51,27 +55,29 @@ blaude --no-network
 # Run isolated (no workspace, workdir /tmp)
 blaude --tmp
 
-# Pass flags to claude
-blaude -- --resume
-blaude -- -c
+# Mix blaude and claude options freely
+blaude --git --ssh -c
+blaude -c --git --ssh
 
 # Run different command in sandbox
-blaude -- bash
+blaude --exec bash
 ```
 
 ## Options
 
 | Option | Description |
 |--------|-------------|
-| `-e KEY=VALUE` | Set environment variable in sandbox |
+| `--env KEY=VALUE` | Set environment variable in sandbox |
 | `-m, --mount PATH` | Mount directory (append `:rw` for read-write) |
-| `-p, --prompt TEXT` | Run claude with `-p` (prompt mode) |
 | `--git` | Mount git config for committing |
 | `--ssh` | Mount SSH keys and forward agent |
 | `--no-network` | Disable network access |
 | `--tmp` | Run isolated in /tmp |
-| `-v, --verbose` | Show bwrap command before executing |
+| `--debug` | Show bwrap command before executing |
 | `--dry-run` | Show command without executing |
+| `--exec CMD` | Run CMD instead of claude |
+
+All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to claude.
 
 ## What's Mounted
 

@@ -1,56 +1,8 @@
 #!/bin/bash
 # blaude - Run Claude Code in a bubblewrap sandbox
-
-show_help() {
-    cat << 'EOF'
-blaude - Run Claude Code in a bubblewrap sandbox
-
-Usage: blaude [OPTIONS] [--] [COMMAND...]
-
-Options:
-  -e KEY=VALUE    Set environment variable in sandbox (can be used multiple times)
-  -m, --mount PATH  Mount additional directory (repeatable)
-                    Append :rw for read-write (default is read-only)
-  -p, --prompt PROMPT  Run claude with -p (prompt mode)
-  --no-network    Disable network access (breaks Claude Code API calls)
-  --git           Mount git config (~/.gitconfig and credentials) for committing
-  --ssh           Mount SSH keys and forward SSH agent for GitHub auth
-  --tmp           Run isolated (no workspace mount, workdir /tmp)
-  -v, --verbose   Display bwrap command before executing
-  --dry-run       Show bwrap command without executing (implies --verbose)
-  -h, --help      Show this help message
-
-Arguments after -- are passed to claude if they start with -, otherwise as the command.
-
-Examples:
-  blaude                          Run claude --dangerously-skip-permissions (default)
-  blaude -e API_KEY=xxx           Start with environment variable
-  blaude -m ~/projects/lib        Mount ~/projects/lib read-only
-  blaude -m ~/projects/lib:rw     Mount read-write instead of read-only
-  blaude -m ~/p1 -m ~/p2          Mount multiple directories
-  blaude --no-network             Start without network access
-  blaude --git                    Enable git commits from inside sandbox
-  blaude --ssh                    Enable SSH auth for GitHub (plugins, git)
-  blaude -- --resume              Resume a conversation (shows picker)
-  blaude -- --resume last         Resume the last conversation
-  blaude -- -c                    Continue the most recent conversation
-  blaude -- bash                  Run bash instead of claude
-  blaude -p "say hello"           Prompt mode
-
-The current directory is mounted at /workspaces/<dirname>.
-~/.claude is mounted read-write for config persistence.
-Only ~/.local/bin and ~/.local/share/claude are exposed from home (read-only).
-
-LLM API environment variables are automatically passed through if set:
-  ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL (for proxy/router), OPENAI_API_KEY,
-  AZURE_OPENAI_API_KEY, GOOGLE_API_KEY, GEMINI_API_KEY, MISTRAL_API_KEY,
-  GROQ_API_KEY, and others (AWS, HuggingFace, etc.)
-
-Prerequisites:
-  - bubblewrap installed (apt install bubblewrap / dnf install bubblewrap)
-  - claude installed at ~/.local/bin/claude
-EOF
-}
+# All options except blaude-specific ones are passed directly to claude.
+# See README.md for blaude options: --env, -m/--mount, --git, --ssh,
+# --no-network, --tmp, --debug, --dry-run, --exec
 
 # Check for bwrap
 if ! command -v bwrap &>/dev/null; then
@@ -76,27 +28,23 @@ safe_dir_name="${dir_name//:/-}"
 
 env_args=()
 mount_args=()
-prompt_arg=""
 command_args=()
 tmp_mode=false
 no_network=false
 git_mode=false
 ssh_mode=false
-verbose=false
+debug=false
 dry_run=false
+exec_mode=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -e)
+        --env)
             env_args+=("$2")
             shift 2
             ;;
         -m|--mount)
             mount_args+=("$2")
-            shift 2
-            ;;
-        -p|--prompt)
-            prompt_arg="$2"
             shift 2
             ;;
         --no-network)
@@ -115,30 +63,23 @@ while [[ $# -gt 0 ]]; do
             tmp_mode=true
             shift
             ;;
-        -v|--verbose)
-            verbose=true
+        --debug)
+            debug=true
             shift
             ;;
         --dry-run)
             dry_run=true
-            verbose=true
+            debug=true
             shift
             ;;
-        -h|--help)
-            show_help
-            exit 0
-            ;;
-        --)
+        --exec)
+            exec_mode=true
             shift
             command_args=("$@")
             break
             ;;
-        -*)
-            echo "Error: Unknown option '$1'" >&2
-            echo "Run 'blaude --help' for usage information" >&2
-            exit 1
-            ;;
         *)
+            # Accumulate ALL unknown args for claude (fixes ordering)
             command_args+=("$1")
             shift
             ;;
@@ -396,10 +337,11 @@ done
 
 # --- Build command ---
 
-if [[ -n "$prompt_arg" ]]; then
-    # Prompt mode: run claude -p with the provided prompt
-    bwrap_args+=(claude --dangerously-skip-permissions -p "$prompt_arg")
+if [[ "$exec_mode" == true ]]; then
+    # --exec: run arbitrary command
+    bwrap_args+=("${command_args[@]}")
 elif [[ ${#command_args[@]} -eq 0 ]]; then
+    # No args: interactive claude (or -p for piped input)
     if [[ -t 0 ]]; then
         bwrap_args+=(claude --dangerously-skip-permissions)
     else
@@ -407,17 +349,13 @@ elif [[ ${#command_args[@]} -eq 0 ]]; then
         bwrap_args+=(claude --dangerously-skip-permissions -p)
     fi
 else
-    # If first arg starts with -, treat as claude flags and prepend default command
-    if [[ "${command_args[0]}" == -* ]]; then
-        bwrap_args+=(claude --dangerously-skip-permissions "${command_args[@]}")
-    else
-        bwrap_args+=("${command_args[@]}")
-    fi
+    # Pass accumulated args to claude
+    bwrap_args+=(claude --dangerously-skip-permissions "${command_args[@]}")
 fi
 
 # --- Execute ---
 
-if [[ "$verbose" == true ]]; then
+if [[ "$debug" == true ]]; then
     # Print command in a way that can be copy-pasted
     printf '\e[2mbwrap' >&2
     for arg in "${bwrap_args[@]}"; do

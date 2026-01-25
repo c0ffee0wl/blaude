@@ -17,14 +17,19 @@ chmod +x blaude
 # Run with defaults (launches Claude Code in sandbox)
 ./blaude
 
-# Test with verbose output to see the bwrap command
-./blaude -v
+# Test with debug output to see the bwrap command
+./blaude --debug
 
 # Dry run (show command without executing)
 ./blaude --dry-run
 
 # Run bash inside sandbox for debugging
-./blaude -- bash
+./blaude --exec bash
+
+# Pass claude options directly
+./blaude -c              # continue conversation
+./blaude -p "hello"      # prompt mode
+./blaude --resume        # resume picker
 ```
 
 ## Key Architecture
@@ -42,10 +47,10 @@ The script builds a complex `bwrap` command with these isolation layers:
 
 ## Important Implementation Details
 
-- Lines 148-161: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
-- Lines 165-174: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
-- Lines 306-325: Additional mount handling with `:rw` suffix parsing for read-write mounts
-- Lines 374-388: LLM API key passthrough loop - add new API keys here if needed
+- Lines 89-102: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
+- Lines 106-115: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
+- Lines 247-266: Additional mount handling with `:rw` suffix parsing for read-write mounts
+- Lines 314-329: LLM API key passthrough loop - add new API keys here if needed
 
 ## Prerequisites
 
