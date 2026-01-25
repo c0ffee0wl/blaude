@@ -93,10 +93,12 @@ done
 
 # --- Ensure Claude config has required flags ---
 
-config_file="$HOME/.claude/.claude.json"
+# Respect CLAUDE_CONFIG_DIR if set, otherwise use default
+config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+config_file="$config_dir/.claude.json"
 required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}'
 
-mkdir -p "$HOME/.claude"
+mkdir -p "$config_dir"
 if [[ -f "$config_file" ]]; then
     # Merge required flags into existing config (requires jq)
     if command -v jq &>/dev/null; then
@@ -162,6 +164,13 @@ bwrap_args+=(
     --dir "/run/user/$sandbox_uid"
 )
 
+# Handle custom temp directory if CLAUDE_CODE_TMPDIR is set
+# Claude appends /claude/ to this path for its temp files
+if [[ -n "${CLAUDE_CODE_TMPDIR:-}" && "$CLAUDE_CODE_TMPDIR" != "/tmp" ]]; then
+    # Ensure the custom tmpdir is writable inside the sandbox
+    bwrap_args+=(--tmpfs "$CLAUDE_CODE_TMPDIR")
+fi
+
 # Minimal home exposure (only what claude needs)
 # Create home directory structure with writable areas for package managers
 bwrap_args+=(--tmpfs "$HOME")
@@ -220,9 +229,9 @@ if [[ -d "$HOME/.local/share/claude" ]]; then
 fi
 
 # Ensure config directory exists on host and create mount point inside sandbox
-mkdir -p "$HOME/.claude"
-bwrap_args+=(--dir "$HOME/.claude")
-bwrap_args+=(--bind "$HOME/.claude" "$HOME/.claude")
+mkdir -p "$config_dir"
+bwrap_args+=(--dir "$config_dir")
+bwrap_args+=(--bind "$config_dir" "$config_dir")
 
 # Network isolation
 if [[ "$no_network" == true ]]; then
@@ -304,7 +313,7 @@ fi
 
 # Claude Code configuration
 bwrap_args+=(
-    --setenv CLAUDE_CONFIG_DIR "$HOME/.claude"
+    --setenv CLAUDE_CONFIG_DIR "$config_dir"
     --setenv DO_NOT_TRACK 1
     --setenv DISABLE_TELEMETRY 1
     --setenv DISABLE_AUTOUPDATER 1
