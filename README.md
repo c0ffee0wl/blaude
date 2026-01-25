@@ -49,6 +49,14 @@ To always run Claude Code in a sandbox, add an alias to your shell config:
 alias claude=blaude
 ```
 
+Commands that need to modify system files automatically bypass the sandbox:
+
+| Command | Reason |
+|---------|--------|
+| `update` | Updates claude binary in `~/.local/bin` |
+| `install` | Installs shell integration |
+| `install-github-app` | Configures GitHub integration |
+
 ## Usage
 
 ```bash

@@ -21,6 +21,11 @@ fi
 # Resolve symlinks to get the real path
 claude_real_path=$(readlink -f "$claude_path")
 
+# Commands that must run outside the sandbox (need write access to system paths)
+if [[ "${1:-}" =~ ^(update|install|install-github-app)$ ]]; then
+    exec claude "$@"
+fi
+
 current_dir=$(pwd)
 dir_name=$(basename "$current_dir")
 # Sanitize directory name (colons can cause issues in some contexts)

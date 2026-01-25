@@ -47,10 +47,11 @@ The script builds a complex `bwrap` command with these isolation layers:
 
 ## Important Implementation Details
 
-- Lines 89-102: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
-- Lines 106-115: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
-- Lines 247-266: Additional mount handling with `:rw` suffix parsing for read-write mounts
-- Lines 314-329: LLM API key passthrough loop - add new API keys here if needed
+- Lines 24-27: Commands that bypass sandbox (`update`, `install`, `install-github-app`) - these need write access outside sandbox
+- Lines 93-106: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
+- Lines 110-119: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
+- Lines 251-270: Additional mount handling with `:rw` suffix parsing for read-write mounts
+- Lines 318-333: LLM API key passthrough loop - add new API keys here if needed
 
 ## Prerequisites
 
