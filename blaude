@@ -233,6 +233,11 @@ mkdir -p "$config_dir"
 bwrap_args+=(--dir "$config_dir")
 bwrap_args+=(--bind "$config_dir" "$config_dir")
 
+# Mount ~/.claude.json (OAuth session, MCP servers, preferences, caches)
+if [[ -f "$HOME/.claude.json" ]]; then
+    bwrap_args+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
+fi
+
 # Network isolation
 if [[ "$no_network" == true ]]; then
     bwrap_args+=(--unshare-net)
