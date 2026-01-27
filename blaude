@@ -233,6 +233,9 @@ fi
 # NVM installs Node.js to ~/.nvm/versions/node/<version>/
 if [[ -d "$HOME/.nvm" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.nvm" "$HOME/.nvm")
+    nvm_installed=true
+else
+    nvm_installed=false
 fi
 
 # Bind host's cargo bin if it exists
@@ -325,9 +328,23 @@ sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/opt/host-bin:/opt/
 # Add NVM bin directory if NVM is installed (for npx, node, npm)
 if [[ -n "${NVM_BIN:-}" ]]; then
     sandbox_path="$sandbox_path:$NVM_BIN"
-elif [[ -d "$HOME/.nvm/versions/node" ]]; then
-    # Find the current/default node version
-    nvm_node_bin=$(find "$HOME/.nvm/versions/node" -maxdepth 2 -name bin -type d 2>/dev/null | head -1)
+elif [[ "$nvm_installed" == true ]]; then
+    # Try to find the current/default node version
+    nvm_node_bin=""
+    if [[ -f "$HOME/.nvm/alias/default" ]]; then
+        # Read default version from alias file (contains version string like "v22.21.1")
+        nvm_version=$(< "$HOME/.nvm/alias/default")
+        # Handle lts/* aliases (e.g., "lts/iron" -> read actual version from lts alias)
+        if [[ "$nvm_version" == lts/* ]]; then
+            lts_name="${nvm_version#lts/}"
+            [[ -f "$HOME/.nvm/alias/lts/$lts_name" ]] && nvm_version=$(< "$HOME/.nvm/alias/lts/$lts_name")
+        fi
+        [[ -d "$HOME/.nvm/versions/node/$nvm_version/bin" ]] && nvm_node_bin="$HOME/.nvm/versions/node/$nvm_version/bin"
+    fi
+    # Fall back to most recently modified node version
+    if [[ -z "$nvm_node_bin" && -d "$HOME/.nvm/versions/node" ]]; then
+        nvm_node_bin=$(ls -td "$HOME/.nvm/versions/node"/*/bin 2>/dev/null | head -1)
+    fi
     [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
 fi
 sandbox_path="$sandbox_path:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
@@ -335,7 +352,12 @@ bwrap_args+=(--setenv PATH "$sandbox_path")
 # Package manager environment variables
 bwrap_args+=(--setenv GOPATH "$HOME/go")
 bwrap_args+=(--setenv CARGO_HOME "$HOME/.cargo")
-bwrap_args+=(--setenv NPM_CONFIG_PREFIX "$HOME/.local")
+# NVM environment: set NVM_DIR and skip NPM_CONFIG_PREFIX (NVM manages its own prefix)
+if [[ "$nvm_installed" == true ]]; then
+    bwrap_args+=(--setenv NVM_DIR "$HOME/.nvm")
+else
+    bwrap_args+=(--setenv NPM_CONFIG_PREFIX "$HOME/.local")
+fi
 bwrap_args+=(--setenv LANG "${LANG:-C.UTF-8}")
 [[ -n "${LC_ALL:-}" ]] && bwrap_args+=(--setenv LC_ALL "$LC_ALL")
 [[ -n "${LC_CTYPE:-}" ]] && bwrap_args+=(--setenv LC_CTYPE "$LC_CTYPE")
@@ -347,7 +369,6 @@ fi
 
 # Claude Code configuration
 bwrap_args+=(
-    --setenv CLAUDE_CONFIG_DIR "$config_dir"
     --setenv DO_NOT_TRACK 1
     --setenv DISABLE_TELEMETRY 1
     --setenv DISABLE_AUTOUPDATER 1
@@ -392,7 +413,7 @@ claude_env_vars=(
     # UI & Display
     CLAUDE_CODE_HIDE_ACCOUNT_INFO CLAUDE_CODE_DISABLE_TERMINAL_TITLE IS_DEMO
     # File & Directory Configuration
-    CLAUDE_CODE_TMPDIR USE_BUILTIN_RIPGREP
+    CLAUDE_CONFIG_DIR CLAUDE_CODE_TMPDIR USE_BUILTIN_RIPGREP
     # Credential & mTLS Authentication
     CLAUDE_CODE_API_KEY_HELPER_TTL_MS CLAUDE_CODE_CLIENT_CERT CLAUDE_CODE_CLIENT_KEY
     CLAUDE_CODE_CLIENT_KEY_PASSPHRASE
