@@ -145,21 +145,25 @@ bwrap_args+=(--ro-bind /usr /usr)
 [[ -d /lib32 ]] && bwrap_args+=(--ro-bind /lib32 /lib32)
 bwrap_args+=(--ro-bind /bin /bin)
 [[ -d /sbin ]] && bwrap_args+=(--ro-bind /sbin /sbin)
-bwrap_args+=(--ro-bind /etc /etc)
-# Fix for WSL2/systemd: /etc/resolv.conf is often a symlink to another location
-# We need to mount the actual file at the symlink target location
+# Mount /etc read-only, but handle resolv.conf symlink specially for WSL2/systemd
 if [[ -L /etc/resolv.conf ]]; then
-    resolv_target=$(readlink -f /etc/resolv.conf)
-    if [[ -f "$resolv_target" ]]; then
-        # Create parent directory and mount the actual file at the symlink target
-        resolv_dir=$(dirname "$resolv_target")
-        bwrap_args+=(--dir "$resolv_dir")
-        bwrap_args+=(--ro-bind "$resolv_target" "$resolv_target")
+    # WSL2/systemd: /etc/resolv.conf is a symlink to /mnt/wsl/resolv.conf
+    # The symlink won't resolve inside sandbox since /mnt/wsl isn't mounted
+    # Use --file to create resolv.conf directly (not bind-mount over broken symlink)
+    resolv_content=$(cat /etc/resolv.conf 2>/dev/null)
+    if [[ -n "$resolv_content" ]]; then
+        resolv_tmp=$(mktemp)
+        echo "$resolv_content" > "$resolv_tmp"
+        exec {resolv_fd}<"$resolv_tmp"
+        bwrap_args+=(--ro-bind /etc /etc)
+        bwrap_args+=(--file $resolv_fd /etc/resolv.conf)
+        # Temp file will be cleaned up when script exits (fd keeps it accessible to bwrap)
+        trap "rm -f '$resolv_tmp'" EXIT
+    else
+        bwrap_args+=(--ro-bind /etc /etc)
     fi
-elif [[ -f /run/systemd/resolve/stub-resolv.conf ]]; then
-    # systemd-resolved: mount the stub file at its expected location
-    bwrap_args+=(--dir /run/systemd/resolve)
-    bwrap_args+=(--ro-bind /run/systemd/resolve/stub-resolv.conf /run/systemd/resolve/stub-resolv.conf)
+else
+    bwrap_args+=(--ro-bind /etc /etc)
 fi
 # /usr/share is already included via /usr, but ensure it's accessible for tools needing
 # terminfo, locales, ca-certificates, etc.
