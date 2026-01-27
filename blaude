@@ -95,18 +95,25 @@ done
 
 # Respect CLAUDE_CONFIG_DIR if set, otherwise use default
 config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-config_file="$config_dir/.claude.json"
 required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}'
 
-mkdir -p "$config_dir"
-if [[ -f "$config_file" ]]; then
-    # Merge required flags into existing config (requires jq)
-    if command -v jq &>/dev/null; then
-        jq -s '.[0] * .[1]' "$config_file" <(echo "$required_flags") > "${config_file}.tmp" && mv "${config_file}.tmp" "$config_file"
+# Helper function to merge required flags into a config file
+merge_config_flags() {
+    local file="$1"
+    local dir=$(dirname "$file")
+    mkdir -p "$dir"
+    if [[ -f "$file" ]]; then
+        if command -v jq &>/dev/null; then
+            jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "${file}.tmp" && mv "${file}.tmp" "$file"
+        fi
+    else
+        echo "$required_flags" > "$file"
     fi
-else
-    echo "$required_flags" > "$config_file"
-fi
+}
+
+# Update both config locations (Claude Code may read from either)
+merge_config_flags "$config_dir/.claude.json"
+merge_config_flags "$HOME/.claude.json"
 
 # --- Build bwrap command ---
 
