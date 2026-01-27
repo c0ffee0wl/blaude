@@ -180,9 +180,8 @@ bwrap_args+=(--dir "$HOME/.local/share")
 bwrap_args+=(--dir "$HOME/.local/lib")
 
 # Writable directories for package managers (ephemeral - cleared on exit)
-# All of ~/.local/share is writable for tools that need it (uv, pip, npm, etc.)
 # ~/.cache is writable for build caches
-# ~/go, ~/.cargo, ~/.npm for language-specific package managers
+# ~/go, ~/.cargo for language-specific package managers
 bwrap_args+=(
     --dir "$HOME/.cache"
     --dir "$HOME/go"
@@ -191,9 +190,14 @@ bwrap_args+=(
     --dir "$HOME/.cargo"
     --dir "$HOME/.cargo/bin"
     --dir "$HOME/.cargo/registry"
-    --dir "$HOME/.npm"
-    --dir "$HOME/.npm/_cacache"
 )
+
+# npm cache: bind host's cache if exists (for npx-based MCP servers), else create empty
+if [[ -d "$HOME/.npm" ]]; then
+    bwrap_args+=(--bind "$HOME/.npm" "$HOME/.npm")
+else
+    bwrap_args+=(--dir "$HOME/.npm" --dir "$HOME/.npm/_cacache")
+fi
 
 # Bind host's user binaries and their backing virtual environments
 # Many tools in ~/.local/bin are symlinks to pipx/uv venvs
@@ -214,8 +218,16 @@ if [[ -d "$HOME/.local/share/pipx" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.local/share/pipx" "$HOME/.local/share/pipx")
 fi
 
-# Note: ~/.local/share/uv is left writable for ephemeral uv tool installs
-# Host's uv binary typically comes from pipx, not from ~/.local/share/uv
+# Bind uv tools directory (for uv-installed MCP servers like notebooklm-mcp)
+# These are symlink targets for tools in ~/.local/bin installed via `uv tool install`
+if [[ -d "$HOME/.local/share/uv/tools" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.local/share/uv/tools" "$HOME/.local/share/uv/tools")
+fi
+
+# uv cache: bind if exists for faster tool installs, else leave ephemeral
+if [[ -d "$HOME/.cache/uv" ]]; then
+    bwrap_args+=(--bind "$HOME/.cache/uv" "$HOME/.cache/uv")
+fi
 
 # Bind host's cargo bin if it exists
 if [[ -d "$HOME/.cargo/bin" ]]; then
