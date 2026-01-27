@@ -146,16 +146,20 @@ bwrap_args+=(--ro-bind /usr /usr)
 bwrap_args+=(--ro-bind /bin /bin)
 [[ -d /sbin ]] && bwrap_args+=(--ro-bind /sbin /sbin)
 bwrap_args+=(--ro-bind /etc /etc)
-# Fix for WSL2: /etc/resolv.conf is often a symlink to /run/... which is empty in sandbox
-# Resolve the symlink and bind-mount the actual file
+# Fix for WSL2/systemd: /etc/resolv.conf is often a symlink to another location
+# We need to mount the actual file at the symlink target location
 if [[ -L /etc/resolv.conf ]]; then
     resolv_target=$(readlink -f /etc/resolv.conf)
     if [[ -f "$resolv_target" ]]; then
-        bwrap_args+=(--ro-bind "$resolv_target" /etc/resolv.conf)
+        # Create parent directory and mount the actual file at the symlink target
+        resolv_dir=$(dirname "$resolv_target")
+        bwrap_args+=(--dir "$resolv_dir")
+        bwrap_args+=(--ro-bind "$resolv_target" "$resolv_target")
     fi
-elif [[ ! -f /etc/resolv.conf && -f /run/systemd/resolve/stub-resolv.conf ]]; then
-    # systemd-resolved fallback
-    bwrap_args+=(--ro-bind /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf)
+elif [[ -f /run/systemd/resolve/stub-resolv.conf ]]; then
+    # systemd-resolved: mount the stub file at its expected location
+    bwrap_args+=(--dir /run/systemd/resolve)
+    bwrap_args+=(--ro-bind /run/systemd/resolve/stub-resolv.conf /run/systemd/resolve/stub-resolv.conf)
 fi
 # /usr/share is already included via /usr, but ensure it's accessible for tools needing
 # terminfo, locales, ca-certificates, etc.
