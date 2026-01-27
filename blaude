@@ -229,6 +229,12 @@ if [[ -d "$HOME/.cache/uv" ]]; then
     bwrap_args+=(--bind "$HOME/.cache/uv" "$HOME/.cache/uv")
 fi
 
+# Bind NVM (Node Version Manager) for npx-based MCP servers
+# NVM installs Node.js to ~/.nvm/versions/node/<version>/
+if [[ -d "$HOME/.nvm" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.nvm" "$HOME/.nvm")
+fi
+
 # Bind host's cargo bin if it exists
 if [[ -d "$HOME/.cargo/bin" ]]; then
     bwrap_args+=(--dir /opt/host-cargo-bin)
@@ -313,8 +319,19 @@ bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
 # PATH includes:
 # 1. Ephemeral package directories (writable, for new installs)
 # 2. Host user binaries at /opt/host-* (read-only, for uv, node, etc.)
-# 3. System directories
-bwrap_args+=(--setenv PATH "$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/opt/host-bin:/opt/host-cargo-bin:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin")
+# 3. NVM node binaries if available
+# 4. System directories
+sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/opt/host-bin:/opt/host-cargo-bin"
+# Add NVM bin directory if NVM is installed (for npx, node, npm)
+if [[ -n "${NVM_BIN:-}" ]]; then
+    sandbox_path="$sandbox_path:$NVM_BIN"
+elif [[ -d "$HOME/.nvm/versions/node" ]]; then
+    # Find the current/default node version
+    nvm_node_bin=$(find "$HOME/.nvm/versions/node" -maxdepth 2 -name bin -type d 2>/dev/null | head -1)
+    [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
+fi
+sandbox_path="$sandbox_path:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
+bwrap_args+=(--setenv PATH "$sandbox_path")
 # Package manager environment variables
 bwrap_args+=(--setenv GOPATH "$HOME/go")
 bwrap_args+=(--setenv CARGO_HOME "$HOME/.cargo")
