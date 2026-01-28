@@ -38,6 +38,7 @@ tmp_mode=false
 no_network=false
 git_mode=false
 ssh_mode=false
+keyring_mode=false
 debug=false
 dry_run=false
 exec_mode=false
@@ -62,6 +63,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ssh)
             ssh_mode=true
+            shift
+            ;;
+        --keyring)
+            keyring_mode=true
             shift
             ;;
         --tmp)
@@ -196,26 +201,25 @@ bwrap_args+=(
     --dir "/run/user/$sandbox_uid"
 )
 
-# D-Bus session bus access (required for keytar/GNOME Keyring/Secret Service)
-# This enables MCP servers like ms-365-mcp to securely store credentials
-# Parse DBUS_SESSION_BUS_ADDRESS to find the socket path (supports unix:path= format)
-# Note: Abstract sockets (unix:abstract=) don't work with namespaces/containers
-dbus_socket=""
-if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-    if [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:path="* ]]; then
-        # Extract path from unix:path=/path/to/socket,... format using parameter expansion
-        dbus_socket="${DBUS_SESSION_BUS_ADDRESS#*unix:path=}"
-        dbus_socket="${dbus_socket%%,*}"
-    elif [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:abstract="* ]]; then
-        [[ $debug -eq 1 ]] && echo "Warning: D-Bus uses abstract socket (won't work in sandbox)" >&2
+# D-Bus session bus access (optional, for keytar/GNOME Keyring/Secret Service)
+# Disabled by default - MCP servers fall back to file-based token storage
+# Enable with --keyring flag if you have GNOME Keyring properly configured
+if [[ "$keyring_mode" == true ]]; then
+    dbus_socket=""
+    if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        if [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:path="* ]]; then
+            dbus_socket="${DBUS_SESSION_BUS_ADDRESS#*unix:path=}"
+            dbus_socket="${dbus_socket%%,*}"
+        elif [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:abstract="* ]]; then
+            [[ $debug -eq 1 ]] && echo "Warning: D-Bus uses abstract socket (won't work in sandbox)" >&2
+        fi
     fi
-fi
-# Fall back to standard systemd path if DBUS_SESSION_BUS_ADDRESS not set or didn't match
-[[ -z "$dbus_socket" ]] && dbus_socket="/run/user/$(id -u)/bus"
+    [[ -z "$dbus_socket" ]] && dbus_socket="/run/user/$(id -u)/bus"
 
-if [[ -S "$dbus_socket" ]]; then
-    bwrap_args+=(--bind "$dbus_socket" "$dbus_socket")
-    [[ $debug -eq 1 ]] && echo "Binding D-Bus session socket: $dbus_socket" >&2
+    if [[ -S "$dbus_socket" ]]; then
+        bwrap_args+=(--bind "$dbus_socket" "$dbus_socket")
+        [[ $debug -eq 1 ]] && echo "Binding D-Bus session socket: $dbus_socket" >&2
+    fi
 fi
 
 # Complete resolv.conf symlink handling (deferred from above, after --tmpfs /run)
@@ -256,29 +260,17 @@ bwrap_args+=(
     --dir "$HOME/.cargo/registry"
 )
 
-# GNOME Keyring storage (required for keytar/Secret Service credential storage)
-# This is where encrypted credentials are stored for MCP servers like ms-365-mcp
-keyrings_dir="$HOME/.local/share/keyrings"
-if [[ -d "$keyrings_dir" ]]; then
-    [[ $debug -eq 1 ]] && echo "Binding GNOME Keyring storage: $keyrings_dir" >&2
-    bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
-else
-    # Create directory structure for keyring if it doesn't exist
-    mkdir -p "$keyrings_dir" 2>/dev/null
-    [[ -d "$keyrings_dir" ]] && bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
-fi
-
-# MCP server token files in home directory (MS 365 MCP server fallback location)
-# These need to persist across sandbox sessions for authentication (when keytar unavailable)
-for token_file in ".token-cache.json" ".selected-account.json"; do
-    token_path="$HOME/$token_file"
-    # Create the file if it doesn't exist (needed for bind mount)
-    [[ ! -f "$token_path" ]] && touch "$token_path" 2>/dev/null
-    if [[ -f "$token_path" ]]; then
-        [[ $debug -eq 1 ]] && echo "Mounting home token file: $token_path" >&2
-        bwrap_args+=(--bind "$token_path" "$token_path")
+# GNOME Keyring storage (optional, only with --keyring flag)
+if [[ "$keyring_mode" == true ]]; then
+    keyrings_dir="$HOME/.local/share/keyrings"
+    if [[ -d "$keyrings_dir" ]]; then
+        [[ $debug -eq 1 ]] && echo "Binding GNOME Keyring storage: $keyrings_dir" >&2
+        bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
+    else
+        mkdir -p "$keyrings_dir" 2>/dev/null
+        [[ -d "$keyrings_dir" ]] && bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
     fi
-done
+fi
 
 # npm cache: bind host's cache if exists (for npx-based MCP servers), else create empty
 if [[ -d "$HOME/.npm" ]]; then
@@ -344,6 +336,18 @@ if [[ -d "$HOME/.nvm" ]]; then
     for link_target in "${!npm_link_targets[@]}"; do
         [[ $debug -eq 1 ]] && echo "Auto-mounting npm-linked package: $link_target" >&2
         bwrap_args+=(--ro-bind "$link_target" "$link_target")
+
+        # MCP server token files (e.g., ms-365-mcp stores tokens at package root)
+        # Mount these read-write over the read-only package mount for persistence
+        for token_file in ".token-cache.json" ".selected-account.json"; do
+            token_path="$link_target/$token_file"
+            # Create the file if it doesn't exist (needed for bind mount)
+            [[ ! -f "$token_path" ]] && touch "$token_path" 2>/dev/null
+            if [[ -f "$token_path" ]]; then
+                [[ $debug -eq 1 ]] && echo "  Mounting token file read-write: $token_path" >&2
+                bwrap_args+=(--bind "$token_path" "$token_path")
+            fi
+        done
     done
 else
     nvm_installed=false
@@ -551,8 +555,8 @@ for var in "${claude_env_vars[@]}"; do
     fi
 done
 
-# D-Bus session bus address (required for keytar/GNOME Keyring/Secret Service)
-if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+# D-Bus session bus address (only with --keyring flag)
+if [[ "$keyring_mode" == true && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
     bwrap_args+=(--setenv DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS")
 fi
 

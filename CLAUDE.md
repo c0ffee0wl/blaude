@@ -82,36 +82,42 @@ Lines 320-347 automatically detect and mount npm-linked packages:
 
 This enables MCP servers installed via `npm link` to work inside the sandbox.
 
-## D-Bus and GNOME Keyring Support (for keytar)
+## MCP Server Token File Persistence
 
-Lines 199-219, 259-268, and 554-557 enable secure credential storage via keytar/libsecret:
+Lines 336-350 handle token storage for npm-linked MCP servers:
+
+- Token files (`.token-cache.json`, `.selected-account.json`) are at **package root**, not `$HOME`
+- For npm-linked packages, these files are mounted read-write over the read-only package mount
+- Files are created if they don't exist
+
+**Why file-based by default?**
+- D-Bus/keytar requires GNOME Keyring to be properly configured and unlocked
+- In headless environments (WSL2, containers), this is often not set up
+- File-based storage is more reliable and works everywhere
+
+## D-Bus and GNOME Keyring Support (optional)
+
+Enabled with `--keyring` flag. Lines 204-222 and 263-271 handle D-Bus/keyring:
 
 | Component | Lines | Purpose |
 |-----------|-------|---------|
-| D-Bus socket | 199-219 | Parses `DBUS_SESSION_BUS_ADDRESS`, binds session socket |
-| Keyrings dir | 259-268 | Binds `~/.local/share/keyrings` read-write |
-| Env passthrough | 554-557 | Passes `DBUS_SESSION_BUS_ADDRESS` to sandbox |
+| D-Bus socket | 204-222 | Parses `DBUS_SESSION_BUS_ADDRESS`, binds session socket |
+| Keyrings dir | 263-271 | Binds `~/.local/share/keyrings` read-write |
+| Env passthrough | 558-560 | Passes `DBUS_SESSION_BUS_ADDRESS` to sandbox |
+
+**When to use `--keyring`**:
+- You have GNOME Keyring properly configured
+- The keyring is unlocked at login
+- You prefer encrypted credential storage
 
 **D-Bus address parsing**:
 - Supports `unix:path=/run/user/$UID/bus` format
 - Warns about abstract sockets (don't work with namespaces)
 - Falls back to standard systemd path
 
-This enables MCP servers like ms-365-mcp-server to store credentials securely in GNOME Keyring.
-
-## MCP Server Token File Persistence
-
-Lines 271-280 handle fallback token storage for MCP servers (when keytar unavailable):
-
-- Binds `~/.token-cache.json` and `~/.selected-account.json` read-write
-- Creates files if they don't exist
-- Overlays the `$HOME` tmpfs so tokens persist across sessions
-
-Used by ms-365-mcp-server when GNOME Keyring is not available.
-
 ## Prerequisites
 
 - bubblewrap (`apt install bubblewrap` or `dnf install bubblewrap`)
 - Claude Code installed and in PATH
 - Optional: `jq` for config file merging
-- Optional: GNOME Keyring / D-Bus session for keytar support
+- Optional: GNOME Keyring / D-Bus session for `--keyring` support

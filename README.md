@@ -103,6 +103,7 @@ blaude --exec bash
 | `--git` | Mount git config for committing |
 | `--ssh` | Mount SSH keys and forward agent |
 | `--no-network` | Disable network access |
+| `--keyring` | Enable GNOME Keyring access (for keytar) |
 | `--tmp` | Run isolated in /tmp |
 | `--debug` | Show bwrap command before executing |
 | `--dry-run` | Show command without executing |
@@ -119,6 +120,16 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `~/.claude` | read-write | Claude Code config |
 | `~/.local/bin`, `~/.local/share/claude` | read-only | Claude binary and data |
 | `~/.cache`, `~/go`, `~/.cargo`, `~/.npm` | ephemeral | Package manager caches (cleared on exit) |
+
+## MCP Server Token Storage
+
+MCP servers like [ms-365-mcp](https://github.com/softeria/ms-365-mcp-server) need to persist authentication tokens. blaude handles this automatically:
+
+- **npm-linked packages**: Token files (`.token-cache.json`, `.selected-account.json`) at package root are mounted read-write
+- **By default**: D-Bus/keytar disabled, forcing file-based storage (more reliable in containers)
+- **With `--keyring`**: Enables GNOME Keyring access for keytar-based storage
+
+If you have GNOME Keyring properly configured (unlocked at login), use `--keyring` for secure credential storage.
 
 ## Environment Variables
 
