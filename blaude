@@ -234,6 +234,18 @@ bwrap_args+=(
     --dir "$HOME/.cargo/registry"
 )
 
+# MCP server token files in home directory (MS 365 MCP server fallback location)
+# These need to persist across sandbox sessions for authentication
+for token_file in ".token-cache.json" ".selected-account.json"; do
+    token_path="$HOME/$token_file"
+    # Create the file if it doesn't exist (needed for bind mount)
+    [[ ! -f "$token_path" ]] && touch "$token_path" 2>/dev/null
+    if [[ -f "$token_path" ]]; then
+        [[ $debug -eq 1 ]] && echo "Mounting home token file: $token_path" >&2
+        bwrap_args+=(--bind "$token_path" "$token_path")
+    fi
+done
+
 # npm cache: bind host's cache if exists (for npx-based MCP servers), else create empty
 if [[ -d "$HOME/.npm" ]]; then
     bwrap_args+=(--bind "$HOME/.npm" "$HOME/.npm")
