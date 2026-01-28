@@ -149,32 +149,28 @@ bwrap_args+=(--ro-bind /bin /bin)
 # bwrap's --file and bind mounts follow symlinks, so if /etc/resolv.conf is a symlink
 # to e.g. /run/systemd/resolve/stub-resolv.conf, we need to create that target path
 # See: https://github.com/containers/bubblewrap/issues/390
+# Note: The actual symlink target mount is added AFTER base args (--tmpfs /run) below
+resolv_symlink_target=""
+resolv_symlink_dir=""
+resolv_tmp=""
 if [[ -L /etc/resolv.conf ]]; then
     resolv_target=$(readlink /etc/resolv.conf)
     resolv_content=$(cat /etc/resolv.conf 2>/dev/null)
     if [[ -n "$resolv_content" && "$resolv_target" == /* ]]; then
-        # Absolute symlink (e.g., -> /run/systemd/resolve/stub-resolv.conf)
-        # Create the target directory and mount our content there
+        # Absolute symlink - save info for later (after --tmpfs /run is added)
         resolv_tmp=$(mktemp)
         echo "$resolv_content" > "$resolv_tmp"
-        resolv_dir=$(dirname "$resolv_target")
-        bwrap_args+=(--ro-bind /etc /etc)
-        bwrap_args+=(--dir "$resolv_dir")
-        bwrap_args+=(--ro-bind "$resolv_tmp" "$resolv_target")
+        resolv_symlink_target="$resolv_target"
+        resolv_symlink_dir=$(dirname "$resolv_target")
         trap "rm -f '$resolv_tmp'" EXIT
     elif [[ -n "$resolv_content" ]]; then
-        # Relative symlink or readable - try direct bind mount over the symlink
+        # Relative symlink - try direct bind mount over the symlink
         resolv_tmp=$(mktemp)
         echo "$resolv_content" > "$resolv_tmp"
-        bwrap_args+=(--ro-bind /etc /etc)
-        bwrap_args+=(--ro-bind "$resolv_tmp" /etc/resolv.conf)
         trap "rm -f '$resolv_tmp'" EXIT
-    else
-        bwrap_args+=(--ro-bind /etc /etc)
     fi
-else
-    bwrap_args+=(--ro-bind /etc /etc)
 fi
+bwrap_args+=(--ro-bind /etc /etc)
 # /usr/share is already included via /usr, but ensure it's accessible for tools needing
 # terminfo, locales, ca-certificates, etc.
 
@@ -199,6 +195,16 @@ bwrap_args+=(
     --tmpfs /run
     --dir "/run/user/$sandbox_uid"
 )
+
+# Complete resolv.conf symlink handling (deferred from above, after --tmpfs /run)
+if [[ -n "$resolv_symlink_target" ]]; then
+    # Create the symlink target directory and mount our content there
+    bwrap_args+=(--dir "$resolv_symlink_dir")
+    bwrap_args+=(--ro-bind "$resolv_tmp" "$resolv_symlink_target")
+elif [[ -n "$resolv_tmp" ]]; then
+    # Relative symlink case - bind mount over /etc/resolv.conf
+    bwrap_args+=(--ro-bind "$resolv_tmp" /etc/resolv.conf)
+fi
 
 # Handle custom temp directory if CLAUDE_CODE_TMPDIR is set
 # Claude appends /claude/ to this path for its temp files
@@ -270,6 +276,29 @@ fi
 if [[ -d "$HOME/.nvm" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.nvm" "$HOME/.nvm")
     nvm_installed=true
+
+    # Auto-detect npm-linked packages and mount their source directories
+    # npm link creates symlinks in node_modules that point outside ~/.nvm
+    declare -A npm_link_targets  # Use associative array to dedupe
+    while IFS= read -r -d '' symlink; do
+        target=$(readlink -f "$symlink" 2>/dev/null)
+        # Only mount if target exists and is outside ~/.nvm
+        if [[ -n "$target" && -e "$target" && "$target" != "$HOME/.nvm"* ]]; then
+            # Get the top-level directory of the linked package
+            # e.g., /home/user/my-project/dist/index.js -> /home/user/my-project
+            link_dir="$target"
+            while [[ "$link_dir" != "/" && "$link_dir" != "$HOME" && ! -f "$link_dir/package.json" ]]; do
+                link_dir=$(dirname "$link_dir")
+            done
+            # Safety: never mount $HOME itself, only subdirectories
+            [[ -f "$link_dir/package.json" && "$link_dir" != "$HOME" ]] && npm_link_targets["$link_dir"]=1
+        fi
+    done < <(find "$HOME/.nvm/versions" -type l -path "*/node_modules/*" -print0 2>/dev/null)
+
+    for link_target in "${!npm_link_targets[@]}"; do
+        [[ $debug -eq 1 ]] && echo "Auto-mounting npm-linked package: $link_target" >&2
+        bwrap_args+=(--ro-bind "$link_target" "$link_target")
+    done
 else
     nvm_installed=false
 fi
