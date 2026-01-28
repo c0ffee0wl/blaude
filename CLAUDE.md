@@ -125,7 +125,7 @@ The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a 
 ```
 
 **Mounts:**
-- `~/.claude/.claudechic.yaml` - Config file (read-write, created if missing)
+- `~/.claude/.claudechic.yaml` - Config file (already writable via `~/.claude` mount)
 - `~/claudechic.log` - Debug log (only if `CLAUDECHIC_DEBUG=1`)
 
 **Environment variables passed through:**

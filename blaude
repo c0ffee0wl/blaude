@@ -379,15 +379,10 @@ if [[ -f "$HOME/.claude.json" ]]; then
     bwrap_args+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
 fi
 
-# claudechic config file (for claudechic TUI wrapper)
-claudechic_config="$config_dir/.claudechic.yaml"
-if [[ -f "$claudechic_config" ]]; then
-    bwrap_args+=(--bind "$claudechic_config" "$claudechic_config")
-elif [[ -d "$config_dir" ]]; then
-    # Create empty file if it doesn't exist (claudechic creates it on first run)
-    touch "$claudechic_config" 2>/dev/null
-    [[ -f "$claudechic_config" ]] && bwrap_args+=(--bind "$claudechic_config" "$claudechic_config")
-fi
+# claudechic config file (~/.claude/.claudechic.yaml) is already accessible
+# via the config_dir mount above - no separate mount needed.
+# Note: Do NOT bind-mount the specific file, as claudechic uses atomic writes
+# (os.replace) which fail on bind-mounted files.
 
 # claudechic debug log (only needed if CLAUDECHIC_DEBUG is set)
 if [[ -n "${CLAUDECHIC_DEBUG:-}" ]]; then
