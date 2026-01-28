@@ -196,6 +196,28 @@ bwrap_args+=(
     --dir "/run/user/$sandbox_uid"
 )
 
+# D-Bus session bus access (required for keytar/GNOME Keyring/Secret Service)
+# This enables MCP servers like ms-365-mcp to securely store credentials
+# Parse DBUS_SESSION_BUS_ADDRESS to find the socket path (supports unix:path= format)
+# Note: Abstract sockets (unix:abstract=) don't work with namespaces/containers
+dbus_socket=""
+if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+    if [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:path="* ]]; then
+        # Extract path from unix:path=/path/to/socket,... format using parameter expansion
+        dbus_socket="${DBUS_SESSION_BUS_ADDRESS#*unix:path=}"
+        dbus_socket="${dbus_socket%%,*}"
+    elif [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:abstract="* ]]; then
+        [[ $debug -eq 1 ]] && echo "Warning: D-Bus uses abstract socket (won't work in sandbox)" >&2
+    fi
+fi
+# Fall back to standard systemd path if DBUS_SESSION_BUS_ADDRESS not set or didn't match
+[[ -z "$dbus_socket" ]] && dbus_socket="/run/user/$(id -u)/bus"
+
+if [[ -S "$dbus_socket" ]]; then
+    bwrap_args+=(--bind "$dbus_socket" "$dbus_socket")
+    [[ $debug -eq 1 ]] && echo "Binding D-Bus session socket: $dbus_socket" >&2
+fi
+
 # Complete resolv.conf symlink handling (deferred from above, after --tmpfs /run)
 if [[ -n "$resolv_symlink_target" ]]; then
     # Create the symlink target directory and mount our content there
@@ -234,8 +256,20 @@ bwrap_args+=(
     --dir "$HOME/.cargo/registry"
 )
 
+# GNOME Keyring storage (required for keytar/Secret Service credential storage)
+# This is where encrypted credentials are stored for MCP servers like ms-365-mcp
+keyrings_dir="$HOME/.local/share/keyrings"
+if [[ -d "$keyrings_dir" ]]; then
+    [[ $debug -eq 1 ]] && echo "Binding GNOME Keyring storage: $keyrings_dir" >&2
+    bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
+else
+    # Create directory structure for keyring if it doesn't exist
+    mkdir -p "$keyrings_dir" 2>/dev/null
+    [[ -d "$keyrings_dir" ]] && bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
+fi
+
 # MCP server token files in home directory (MS 365 MCP server fallback location)
-# These need to persist across sandbox sessions for authentication
+# These need to persist across sandbox sessions for authentication (when keytar unavailable)
 for token_file in ".token-cache.json" ".selected-account.json"; do
     token_path="$HOME/$token_file"
     # Create the file if it doesn't exist (needed for bind mount)
@@ -516,6 +550,11 @@ for var in "${claude_env_vars[@]}"; do
         bwrap_args+=(--setenv "$var" "${!var}")
     fi
 done
+
+# D-Bus session bus address (required for keytar/GNOME Keyring/Secret Service)
+if [[ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+    bwrap_args+=(--setenv DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS")
+fi
 
 # User-specified environment variables
 for env_spec in "${env_args[@]}"; do
