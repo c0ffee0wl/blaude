@@ -115,9 +115,53 @@ Enabled with `--keyring` flag. Lines 204-222 and 263-271 handle D-Bus/keyring:
 - Warns about abstract sockets (don't work with namespaces)
 - Falls back to standard systemd path
 
+## claudechic Support
+
+The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a Python-based TUI wrapper) instead of bare Claude Code:
+
+```bash
+./blaude --chic              # Run claudechic in sandbox
+./blaude --chic -c           # Continue conversation via claudechic
+```
+
+**Mounts:**
+- `~/.claude/.claudechic.yaml` - Config file (read-write, created if missing)
+- `~/claudechic.log` - Debug log (only if `CLAUDECHIC_DEBUG=1`)
+
+**Environment variables passed through:**
+- `CLAUDECHIC_DEBUG` - Enable debug logging
+- `CLAUDECHIC_REMOTE_PORT` - HTTP server for remote control
+- `CHIC_PROFILE` - CPU profiling toggle
+- `CHIC_SAMPLE_THRESHOLD` - CPU sampling threshold
+
+## notebooklm-mcp Support
+
+The [notebooklm-mcp](https://github.com/c0ffee0wl/notebooklm-mcp) MCP server is automatically supported with auth persistence:
+
+**Mounts:**
+- `~/.notebooklm-mcp/` - Entire directory (read-write, created if missing)
+  - `auth.json` - Token cache (cookies, CSRF, session ID)
+  - `chrome-profile/` - Persistent Chrome profile for auto re-auth
+
+**Environment variables passed through:**
+- `NOTEBOOKLM_COOKIES`, `NOTEBOOKLM_CSRF_TOKEN`, `NOTEBOOKLM_SESSION_ID` - Override cached auth
+- `NOTEBOOKLM_MCP_TRANSPORT`, `NOTEBOOKLM_MCP_HOST`, `NOTEBOOKLM_MCP_PORT` - Server config
+- `NOTEBOOKLM_MCP_DEBUG`, `NOTEBOOKLM_QUERY_TIMEOUT`, `NOTEBOOKLM_BL` - Debug/tuning
+
+**Usage:**
+```bash
+# Authenticate outside sandbox first (requires browser)
+notebooklm-mcp-auth
+
+# Then use normally inside sandbox - MCP server reads cached tokens
+./blaude
+```
+
 ## Prerequisites
 
 - bubblewrap (`apt install bubblewrap` or `dnf install bubblewrap`)
 - Claude Code installed and in PATH
 - Optional: `jq` for config file merging
 - Optional: GNOME Keyring / D-Bus session for `--keyring` support
+- Optional: [claudechic](https://github.com/c0ffee0wl/claudechic) for `--chic` mode
+- Optional: [notebooklm-mcp](https://github.com/c0ffee0wl/notebooklm-mcp) for NotebookLM integration
