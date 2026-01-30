@@ -163,7 +163,7 @@ nlm login --profile work       # Named profile
 
 ## WSL2 Support
 
-WSL2 is auto-detected via `/proc/sys/kernel/osrelease`.
+WSL2 is auto-detected via `/proc/sys/kernel/osrelease` or `/proc/version` (checks for "microsoft").
 
 **Known issues:**
 - WSL2's 9P filesystem (drvfs) can have race conditions with bind mounts

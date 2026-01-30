@@ -45,9 +45,12 @@ dry_run=false
 exec_mode=false
 chic_mode=false
 
-# Auto-detect WSL2
+# Auto-detect WSL (check both osrelease and /proc/version for robustness)
 wsl_mode=false
-grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && wsl_mode=true
+if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || \
+   grep -qi microsoft /proc/version 2>/dev/null; then
+    wsl_mode=true
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
