@@ -2,7 +2,7 @@
 # blaude - Run Claude Code in a bubblewrap sandbox
 # All options except blaude-specific ones are passed directly to claude.
 # See README.md for blaude options: --env, -m/--mount, --git, --ssh,
-# --no-network, --tmp, --debug, --dry-run, --exec
+# --no-network, --tmp, --keep-env, --debug, --dry-run, --exec
 
 # Check for bwrap
 if ! command -v bwrap &>/dev/null; then
@@ -39,6 +39,7 @@ no_network=false
 git_mode=false
 ssh_mode=false
 keyring_mode=false
+keep_env_mode=false
 debug=false
 dry_run=false
 exec_mode=false
@@ -68,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --keyring)
             keyring_mode=true
+            shift
+            ;;
+        --keep-env)
+            keep_env_mode=true
             shift
             ;;
         --tmp)
@@ -455,12 +460,15 @@ else
     bwrap_args+=(--chdir "/workspaces/$safe_dir_name")
 fi
 
-# Clean environment with selective passthrough
-bwrap_args+=(--clearenv)
-bwrap_args+=(--setenv HOME "$HOME")
-bwrap_args+=(--setenv USER "${USER:-$(whoami)}")
-bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
-[[ -n "${COLORTERM:-}" ]] && bwrap_args+=(--setenv COLORTERM "$COLORTERM")
+# Environment handling
+if [[ "$keep_env_mode" != true ]]; then
+    # Clean environment with selective passthrough (default)
+    bwrap_args+=(--clearenv)
+    bwrap_args+=(--setenv HOME "$HOME")
+    bwrap_args+=(--setenv USER "${USER:-$(whoami)}")
+    bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
+    [[ -n "${COLORTERM:-}" ]] && bwrap_args+=(--setenv COLORTERM "$COLORTERM")
+fi
 # PATH includes:
 # 1. Ephemeral package directories (writable, for new installs)
 # 2. Host user binaries at /opt/host-* (read-only, for uv, node, etc.)
@@ -500,13 +508,15 @@ if [[ "$nvm_installed" == true ]]; then
 else
     bwrap_args+=(--setenv NPM_CONFIG_PREFIX "$HOME/.local")
 fi
-bwrap_args+=(--setenv LANG "${LANG:-C.UTF-8}")
-[[ -n "${LC_ALL:-}" ]] && bwrap_args+=(--setenv LC_ALL "$LC_ALL")
-[[ -n "${LC_CTYPE:-}" ]] && bwrap_args+=(--setenv LC_CTYPE "$LC_CTYPE")
+if [[ "$keep_env_mode" != true ]]; then
+    bwrap_args+=(--setenv LANG "${LANG:-C.UTF-8}")
+    [[ -n "${LC_ALL:-}" ]] && bwrap_args+=(--setenv LC_ALL "$LC_ALL")
+    [[ -n "${LC_CTYPE:-}" ]] && bwrap_args+=(--setenv LC_CTYPE "$LC_CTYPE")
 
-# SSH agent forwarding env var
-if [[ "$ssh_mode" == true && -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
-    bwrap_args+=(--setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK")
+    # SSH agent forwarding env var
+    if [[ "$ssh_mode" == true && -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
+        bwrap_args+=(--setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK")
+    fi
 fi
 
 # Claude Code configuration
@@ -583,15 +593,18 @@ claude_env_vars=(
     NOTEBOOKLM_MCP_TRANSPORT NOTEBOOKLM_MCP_HOST NOTEBOOKLM_MCP_PORT
     NOTEBOOKLM_MCP_DEBUG NOTEBOOKLM_QUERY_TIMEOUT NOTEBOOKLM_BL
 )
-for var in "${claude_env_vars[@]}"; do
-    if [[ -n "${!var:-}" ]]; then
-        bwrap_args+=(--setenv "$var" "${!var}")
-    fi
-done
+# Only passthrough specific vars when environment is cleared (default)
+if [[ "$keep_env_mode" != true ]]; then
+    for var in "${claude_env_vars[@]}"; do
+        if [[ -n "${!var:-}" ]]; then
+            bwrap_args+=(--setenv "$var" "${!var}")
+        fi
+    done
 
-# D-Bus session bus address (only with --keyring flag)
-if [[ "$keyring_mode" == true && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-    bwrap_args+=(--setenv DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS")
+    # D-Bus session bus address (only with --keyring flag)
+    if [[ "$keyring_mode" == true && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
+        bwrap_args+=(--setenv DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS")
+    fi
 fi
 
 # User-specified environment variables

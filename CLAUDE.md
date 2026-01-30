@@ -34,6 +34,9 @@ chmod +x blaude
 # Mount additional paths
 ./blaude -m /path/to/dir          # read-only
 ./blaude -m /path/to/dir:rw       # read-write
+
+# Keep entire host environment (skip --clearenv)
+./blaude --keep-env
 ```
 
 ## Key Architecture
@@ -47,7 +50,7 @@ The script builds a complex `bwrap` command with these isolation layers:
    - Current working directory mounted at `/workspaces/<dirname>` read-write
    - `~/.claude` mounted read-write for config persistence
    - Ephemeral writable dirs for package managers (`~/.cache`, `~/go`, `~/.cargo`, `~/.npm`)
-4. **Environment sanitization**: `--clearenv` with selective passthrough of LLM API keys and essential vars
+4. **Environment sanitization**: `--clearenv` with selective passthrough of LLM API keys and essential vars (use `--keep-env` to preserve host environment)
 
 ## Important Implementation Details
 
