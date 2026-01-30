@@ -161,6 +161,23 @@ nlm login --profile work       # Named profile
 ./blaude
 ```
 
+## WSL2 Support
+
+WSL2 is auto-detected via `/proc/sys/kernel/osrelease`.
+
+**Known issues:**
+- WSL2's 9P filesystem (drvfs) can have race conditions with bind mounts
+- File operations may fail with `ENOENT: no such file or directory, statx`
+- This is a [known WSL2 issue](https://github.com/microsoft/WSL/issues/2780) with concurrent file operations
+
+**Workarounds applied:**
+- `sync` is called before and after sandbox execution to flush pending filesystem operations
+
+**If issues persist:**
+- Try running `sync` manually before blaude
+- Ensure your WSL2 is up to date (`wsl --update`)
+- Consider storing your workspace on the Linux filesystem (`/home/...`) instead of Windows (`/mnt/c/...`)
+
 ## Prerequisites
 
 - bubblewrap (`apt install bubblewrap` or `dnf install bubblewrap`)
@@ -168,4 +185,4 @@ nlm login --profile work       # Named profile
 - Optional: `jq` for config file merging
 - Optional: GNOME Keyring / D-Bus session for `--keyring` support
 - Optional: [claudechic](https://github.com/c0ffee0wl/claudechic) for `--chic` mode
-- Optional: [notebooklm-mcp](https://github.com/c0ffee0wl/notebooklm-mcp) for NotebookLM integration
+- Optional: [notebooklm-mcp-cli](https://github.com/jacob-bd/notebooklm-mcp-cli) for NotebookLM integration

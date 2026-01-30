@@ -45,6 +45,10 @@ dry_run=false
 exec_mode=false
 chic_mode=false
 
+# Auto-detect WSL2
+wsl_mode=false
+grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && wsl_mode=true
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --env)
@@ -661,6 +665,16 @@ fi
 
 if [[ "$dry_run" == true ]]; then
     exit 0
+fi
+
+# WSL2 workarounds: sync filesystem to reduce race conditions with 9P/drvfs
+# WSL2's virtualized filesystem can have timing issues with bind mounts
+if [[ "$wsl_mode" == true ]]; then
+    [[ "$debug" == true ]] && echo "WSL2 detected: syncing filesystem" >&2
+    sync
+    trap sync EXIT
+    bwrap "${bwrap_args[@]}"
+    exit $?
 fi
 
 exec bwrap "${bwrap_args[@]}"
