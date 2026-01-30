@@ -2,7 +2,7 @@
 # blaude - Run Claude Code in a bubblewrap sandbox
 # All options except blaude-specific ones are passed directly to claude.
 # See README.md for blaude options: --env, -m/--mount, --git, --ssh,
-# --no-network, --tmp, --keep-env, --debug, --dry-run, --exec
+# --no-network, --tmp, --clear-tmp, --keep-env, --debug, --dry-run, --exec
 
 # Check for bwrap
 if ! command -v bwrap &>/dev/null; then
@@ -44,6 +44,7 @@ debug=false
 dry_run=false
 exec_mode=false
 chic_mode=false
+clear_tmp_mode=false
 
 # Auto-detect WSL (check both osrelease and /proc/version for robustness)
 wsl_mode=false
@@ -84,6 +85,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --tmp)
             tmp_mode=true
+            shift
+            ;;
+        --clear-tmp)
+            clear_tmp_mode=true
             shift
             ;;
         --debug)
@@ -212,7 +217,14 @@ fi
 bwrap_args+=(
     --dev /dev
     --proc /proc
-    --tmpfs /tmp
+)
+# /tmp: bind host's /tmp by default, use tmpfs with --clear-tmp
+if [[ "$clear_tmp_mode" == true ]]; then
+    bwrap_args+=(--tmpfs /tmp)
+else
+    bwrap_args+=(--bind /tmp /tmp)
+fi
+bwrap_args+=(
     --tmpfs /var
     --tmpfs /run
     --dir "/run/user/$sandbox_uid"

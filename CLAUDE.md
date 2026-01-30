@@ -37,6 +37,9 @@ chmod +x blaude
 
 # Keep entire host environment (skip --clearenv)
 ./blaude --keep-env
+
+# Use isolated tmpfs for /tmp instead of host's /tmp
+./blaude --clear-tmp
 ```
 
 ## Key Architecture
@@ -47,6 +50,7 @@ The script builds a complex `bwrap` command with these isolation layers:
 2. **Capability dropping**: All capabilities dropped via `--cap-drop ALL`
 3. **Filesystem sandboxing**:
    - System dirs (`/usr`, `/lib`, `/bin`, `/etc`) mounted read-only
+   - Host's `/tmp` mounted read-write by default (use `--clear-tmp` for isolated tmpfs)
    - Current working directory mounted at `/workspaces/<dirname>` read-write
    - `~/.claude` mounted read-write for config persistence
    - Ephemeral writable dirs for package managers (`~/.cache`, `~/go`, `~/.cargo`, `~/.npm`)

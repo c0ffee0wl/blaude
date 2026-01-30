@@ -106,6 +106,7 @@ blaude --exec bash
 | `--keyring` | Enable GNOME Keyring access (for keytar) |
 | `--chic` | Run [claudechic](https://github.com/c0ffee0wl/claudechic) TUI instead of claude |
 | `--tmp` | Run isolated in /tmp |
+| `--clear-tmp` | Use empty tmpfs for /tmp instead of mounting host's /tmp |
 | `--debug` | Show bwrap command before executing |
 | `--dry-run` | Show command without executing |
 | `--exec CMD` | Run CMD instead of claude |
@@ -117,6 +118,7 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | Path | Access | Purpose |
 |------|--------|---------|
 | `/usr`, `/lib*`, `/bin`, `/etc` | read-only | System binaries and libraries |
+| `/tmp` | read-write | Host's /tmp (use `--clear-tmp` for isolated tmpfs) |
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
 | `~/.notebooklm-mcp/` | read-write | notebooklm-mcp auth and Chrome profile |
