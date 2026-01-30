@@ -50,6 +50,7 @@ The script builds a complex `bwrap` command with these isolation layers:
    - Current working directory mounted at `/workspaces/<dirname>` read-write
    - `~/.claude` mounted read-write for config persistence
    - Ephemeral writable dirs for package managers (`~/.cache`, `~/go`, `~/.cargo`, `~/.npm`)
+   - uv tools and managed Python versions (`~/.local/share/uv/tools`, `~/.local/share/uv/python`)
 4. **Environment sanitization**: `--clearenv` with selective passthrough of LLM API keys and essential vars (use `--keep-env` to preserve host environment)
 
 ## Important Implementation Details

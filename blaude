@@ -314,6 +314,11 @@ if [[ -d "$HOME/.local/share/uv/tools" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.local/share/uv/tools" "$HOME/.local/share/uv/tools")
 fi
 
+# Bind uv-managed Python installations (some uv tools use these instead of system Python)
+if [[ -d "$HOME/.local/share/uv/python" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.local/share/uv/python" "$HOME/.local/share/uv/python")
+fi
+
 # uv cache: bind if exists for faster tool installs, else leave ephemeral
 if [[ -d "$HOME/.cache/uv" ]]; then
     bwrap_args+=(--bind "$HOME/.cache/uv" "$HOME/.cache/uv")
