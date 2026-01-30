@@ -136,12 +136,11 @@ The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a 
 
 ## notebooklm-mcp Support
 
-The [notebooklm-mcp](https://github.com/c0ffee0wl/notebooklm-mcp) MCP server is automatically supported with auth persistence:
+The [notebooklm-mcp-cli](https://github.com/jacob-bd/notebooklm-mcp-cli) MCP server is supported with auth persistence:
 
 **Mounts:**
-- `~/.notebooklm-mcp/` - Entire directory (read-write, created if missing)
-  - `auth.json` - Token cache (cookies, CSRF, session ID)
-  - `chrome-profile/` - Persistent Chrome profile for auto re-auth
+- `~/.notebooklm-mcp/` - Auth directory (read-write, created if missing)
+- `~/.notebooklm-mcp-cli/` - Auth directory (read-write, created if missing)
 
 **Environment variables passed through:**
 - `NOTEBOOKLM_COOKIES`, `NOTEBOOKLM_CSRF_TOKEN`, `NOTEBOOKLM_SESSION_ID` - Override cached auth
@@ -151,7 +150,8 @@ The [notebooklm-mcp](https://github.com/c0ffee0wl/notebooklm-mcp) MCP server is 
 **Usage:**
 ```bash
 # Authenticate outside sandbox first (requires browser)
-notebooklm-mcp-auth
+nlm login                      # Default profile
+nlm login --profile work       # Named profile
 
 # Then use normally inside sandbox - MCP server reads cached tokens
 ./blaude

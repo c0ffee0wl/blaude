@@ -391,15 +391,15 @@ if [[ -n "${CLAUDECHIC_DEBUG:-}" ]]; then
     [[ -f "$claudechic_log" ]] && bwrap_args+=(--bind "$claudechic_log" "$claudechic_log")
 fi
 
-# notebooklm-mcp auth directory (token cache and Chrome profile for re-auth)
-notebooklm_dir="$HOME/.notebooklm-mcp"
-if [[ -d "$notebooklm_dir" ]]; then
-    bwrap_args+=(--bind "$notebooklm_dir" "$notebooklm_dir")
-else
-    # Create directory if it doesn't exist (MCP server creates files on first auth)
-    mkdir -p "$notebooklm_dir" 2>/dev/null
-    [[ -d "$notebooklm_dir" ]] && bwrap_args+=(--bind "$notebooklm_dir" "$notebooklm_dir")
-fi
+# notebooklm-mcp auth directories (token cache, Chrome profiles, config)
+for notebooklm_dir in "$HOME/.notebooklm-mcp" "$HOME/.notebooklm-mcp-cli"; do
+    if [[ -d "$notebooklm_dir" ]]; then
+        bwrap_args+=(--bind "$notebooklm_dir" "$notebooklm_dir")
+    else
+        mkdir -p "$notebooklm_dir" 2>/dev/null
+        [[ -d "$notebooklm_dir" ]] && bwrap_args+=(--bind "$notebooklm_dir" "$notebooklm_dir")
+    fi
+done
 
 # Network isolation
 if [[ "$no_network" == true ]]; then
