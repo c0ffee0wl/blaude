@@ -170,17 +170,18 @@ nlm login --profile work       # Named profile
 WSL2 is auto-detected via `/proc/sys/kernel/osrelease` or `/proc/version` (checks for "microsoft").
 
 **Known issues:**
-- WSL2's 9P filesystem (drvfs) can have race conditions with bind mounts
+- WSL2's 9P filesystem (drvfs) can have race conditions with file operations
 - File operations may fail with `ENOENT: no such file or directory, statx`
-- This is a [known WSL2 issue](https://github.com/microsoft/WSL/issues/2780) with concurrent file operations
+- Related issues: [#2780](https://github.com/microsoft/WSL/issues/2780), [#8443](https://github.com/microsoft/WSL/issues/8443)
 
 **Workarounds applied:**
-- `sync` is called before and after sandbox execution to flush pending filesystem operations
+- `sync` is called before sandbox execution to flush pending filesystem operations
+- Filesystem caches are dropped (`echo 2 > /proc/sys/vm/drop_caches`) to clear stale negative dentries
+- `sync` is called on exit via trap
 
 **If issues persist:**
-- Try running `sync` manually before blaude
 - Ensure your WSL2 is up to date (`wsl --update`)
-- Consider storing your workspace on the Linux filesystem (`/home/...`) instead of Windows (`/mnt/c/...`)
+- Store your workspace on the Linux filesystem (`/home/...`) instead of Windows (`/mnt/c/...`) - this avoids 9P entirely and is much faster
 
 ## Prerequisites
 

@@ -602,6 +602,8 @@ claude_env_vars=(
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
     # Network & Proxy
     HTTP_PROXY HTTPS_PROXY NO_PROXY CLAUDE_CODE_PROXY_RESOLVES_HOSTS
+    # GitHub (for gh CLI, git operations, MCP servers)
+    GH_TOKEN GITHUB_TOKEN
     # Additional LLM API keys (for MCP servers and tools that may use them)
     OPENAI_API_KEY OPENAI_API_BASE OPENAI_ORG_ID
     AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION
@@ -682,14 +684,28 @@ if [[ "$dry_run" == true ]]; then
     exit 0
 fi
 
-# WSL2 workarounds: sync filesystem to reduce race conditions with 9P/drvfs
-# WSL2's virtualized filesystem can have timing issues with bind mounts
+# WSL2 workarounds: mitigate 9P/drvfs race conditions
+# References:
+#   - https://github.com/microsoft/WSL/issues/2780 (ENOENT with concurrent file ops)
+#   - https://github.com/microsoft/WSL/issues/8443 (fstat ENOENT after rename)
 if [[ "$wsl_mode" == true ]]; then
-    [[ "$debug" == true ]] && echo "WSL2 detected: syncing filesystem" >&2
+    [[ "$debug" == true ]] && echo "WSL2 detected: dropping caches" >&2
+
+    # Warn if workspace is on Windows filesystem (9P) - prone to ENOENT race conditions
+    if [[ "$current_dir" == /mnt/* ]]; then
+        echo "Warning: Workspace is on Windows filesystem (/mnt/*)." >&2
+        echo "  WSL2's 9P protocol has known bugs causing spurious ENOENT errors." >&2
+        echo "  For best reliability, move your project to the Linux filesystem:" >&2
+        echo "  e.g., /home/\$USER/projects/ instead of /mnt/c/..." >&2
+        echo "" >&2
+    fi
+
     sync
-    trap sync EXIT
-    bwrap "${bwrap_args[@]}"
-    exit $?
+    # Drop dentries and inodes to clear stale negative dentry cache
+    # This helps prevent spurious ENOENT errors from cached "file not found" results
+    echo 2 > /proc/sys/vm/drop_caches 2>/dev/null || true
+    trap 'sync' EXIT
+    exec bwrap "${bwrap_args[@]}"
 fi
 
 exec bwrap "${bwrap_args[@]}"
