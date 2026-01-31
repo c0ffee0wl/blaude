@@ -142,6 +142,22 @@ The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a 
 - `CHIC_PROFILE` - CPU profiling toggle
 - `CHIC_SAMPLE_THRESHOLD` - CPU sampling threshold
 
+## Fabric Support
+
+[Fabric](https://github.com/danielmiessler/fabric) config directory is automatically mounted:
+
+**Mount:**
+- `~/.config/fabric/` - Config directory (read-write, created if missing)
+
+**Contents:**
+- `patterns/` - Built-in patterns
+- `sessions/` - Chat session history
+- `contexts/` - Context definitions
+- `strategies/` - Prompt strategies
+- `extensions/` - Custom extensions
+- `.env` - API keys and config
+- `.{provider}_oauth` - OAuth credentials
+
 ## notebooklm-mcp Support
 
 The [notebooklm-mcp-cli](https://github.com/jacob-bd/notebooklm-mcp-cli) MCP server is supported with auth persistence:

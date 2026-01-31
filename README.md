@@ -121,6 +121,7 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `/tmp` | read-write | Host's /tmp (use `--clear-tmp` for isolated tmpfs) |
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
+| `~/.config/fabric/` | read-write | Fabric patterns, sessions, contexts, config |
 | `~/.notebooklm-mcp/` | read-write | notebooklm-mcp auth and Chrome profile |
 | `~/.local/bin`, `~/.local/share/claude` | read-only | Claude binary and data |
 | `~/.cache`, `~/go`, `~/.cargo`, `~/.npm` | ephemeral | Package manager caches (cleared on exit) |
@@ -145,6 +146,20 @@ blaude --chic -c           # Continue conversation via claudechic
 ```
 
 Config file (`~/.claude/.claudechic.yaml`) is writable via the `~/.claude` mount.
+
+## Fabric Support
+
+[Fabric](https://github.com/danielmiessler/fabric) is an AI augmentation framework. blaude automatically mounts `~/.config/fabric/` for full functionality:
+
+```bash
+# Setup fabric outside sandbox first
+fabric --setup
+
+# Then use normally inside sandbox
+blaude --exec fabric -p "summarize"
+```
+
+The directory stores patterns, sessions, contexts, strategies, extensions, OAuth tokens, and `.env` configuration.
 
 ## notebooklm-mcp Support
 

@@ -430,6 +430,16 @@ for notebooklm_dir in "$HOME/.notebooklm-mcp" "$HOME/.notebooklm-mcp-cli"; do
     fi
 done
 
+# Fabric config directory (~/.config/fabric/)
+# Stores patterns, sessions, contexts, strategies, extensions, OAuth tokens, .env
+fabric_dir="$HOME/.config/fabric"
+if [[ -d "$fabric_dir" ]]; then
+    bwrap_args+=(--bind "$fabric_dir" "$fabric_dir")
+else
+    mkdir -p "$fabric_dir" 2>/dev/null
+    [[ -d "$fabric_dir" ]] && bwrap_args+=(--bind "$fabric_dir" "$fabric_dir")
+fi
+
 # Network isolation
 if [[ "$no_network" == true ]]; then
     bwrap_args+=(--unshare-net)
