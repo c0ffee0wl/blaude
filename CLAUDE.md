@@ -142,6 +142,15 @@ The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a 
 - `CHIC_PROFILE` - CPU profiling toggle
 - `CHIC_SAMPLE_THRESHOLD` - CPU sampling threshold
 
+## Google Chrome Profile Support
+
+If `~/.config/google-chrome/` exists, it's mounted read-write for:
+- Browser automation (Puppeteer, Playwright)
+- Browser-based OAuth flows
+- MCP servers requiring Chrome access
+
+Not created automatically - only mounted if already present.
+
 ## Fabric Support
 
 [Fabric](https://github.com/danielmiessler/fabric) config directory is automatically mounted:

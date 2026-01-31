@@ -122,6 +122,7 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
 | `~/.config/fabric/` | read-write | Fabric patterns, sessions, contexts, config |
+| `~/.config/google-chrome/` | read-write | Chrome profile (for browser automation) |
 | `~/.notebooklm-mcp/` | read-write | notebooklm-mcp auth and Chrome profile |
 | `~/.local/bin`, `~/.local/share/claude` | read-only | Claude binary and data |
 | `~/.cache`, `~/go`, `~/.cargo`, `~/.npm` | ephemeral | Package manager caches (cleared on exit) |
@@ -146,6 +147,16 @@ blaude --chic -c           # Continue conversation via claudechic
 ```
 
 Config file (`~/.claude/.claudechic.yaml`) is writable via the `~/.claude` mount.
+
+## Google Chrome Profile
+
+If `~/.config/google-chrome/` exists, it's automatically mounted read-write. This enables:
+
+- Browser automation tools (Puppeteer, Playwright)
+- Browser-based OAuth authentication flows
+- MCP servers that need Chrome/Chromium access
+
+The directory is only mounted if it already exists (not created automatically).
 
 ## Fabric Support
 

@@ -440,6 +440,13 @@ else
     [[ -d "$fabric_dir" ]] && bwrap_args+=(--bind "$fabric_dir" "$fabric_dir")
 fi
 
+# Google Chrome profile (~/.config/google-chrome/)
+# Used by tools requiring browser automation (Puppeteer, Playwright, browser-based auth)
+chrome_dir="$HOME/.config/google-chrome"
+if [[ -d "$chrome_dir" ]]; then
+    bwrap_args+=(--bind "$chrome_dir" "$chrome_dir")
+fi
+
 # Network isolation
 if [[ "$no_network" == true ]]; then
     bwrap_args+=(--unshare-net)
