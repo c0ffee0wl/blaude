@@ -727,7 +727,10 @@ if [[ "$wsl_mode" == true ]]; then
     sync
     # Drop dentries and inodes to clear stale negative dentry cache
     # This helps prevent spurious ENOENT errors from cached "file not found" results
-    sudo sh -c 'echo 2 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+    # Only write if not already set to 2 (avoids unnecessary sudo prompt)
+    if [[ "$(cat /proc/sys/vm/drop_caches 2>/dev/null)" != "2" ]]; then
+        sudo sh -c 'echo 2 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+    fi
     trap 'sync' EXIT
     exec bwrap "${bwrap_args[@]}"
 fi
