@@ -430,21 +430,10 @@ for notebooklm_dir in "$HOME/.notebooklm-mcp" "$HOME/.notebooklm-mcp-cli"; do
     fi
 done
 
-# Fabric config directory (~/.config/fabric/)
-# Stores patterns, sessions, contexts, strategies, extensions, OAuth tokens, .env
-fabric_dir="$HOME/.config/fabric"
-if [[ -d "$fabric_dir" ]]; then
-    bwrap_args+=(--bind "$fabric_dir" "$fabric_dir")
-else
-    mkdir -p "$fabric_dir" 2>/dev/null
-    [[ -d "$fabric_dir" ]] && bwrap_args+=(--bind "$fabric_dir" "$fabric_dir")
-fi
-
-# Google Chrome profile (~/.config/google-chrome/)
-# Used by tools requiring browser automation (Puppeteer, Playwright, browser-based auth)
-chrome_dir="$HOME/.config/google-chrome"
-if [[ -d "$chrome_dir" ]]; then
-    bwrap_args+=(--bind "$chrome_dir" "$chrome_dir")
+# User config directory (~/.config/)
+# Includes uv config (python-preference), fabric, google-chrome, and other tool configs
+if [[ -d "$HOME/.config" ]]; then
+    bwrap_args+=(--bind "$HOME/.config" "$HOME/.config")
 fi
 
 # Network isolation
