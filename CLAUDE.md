@@ -46,7 +46,7 @@ chmod +x blaude
 
 The script builds a complex `bwrap` command with these isolation layers:
 
-1. **Namespace isolation**: PID, IPC, cgroup, UTS namespaces with custom hostname "blaude"
+1. **Namespace isolation**: PID, IPC, UTS, user namespaces with custom hostname "blaude"; optional network namespace with `--no-network`
 2. **Capability dropping**: All capabilities dropped via `--cap-drop ALL`
 3. **Filesystem sandboxing**:
    - System dirs (`/usr`, `/lib`, `/bin`, `/etc`) mounted read-only

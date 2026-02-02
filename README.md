@@ -6,9 +6,9 @@ Run [Claude Code](https://claude.ai/code) in a [bubblewrap](https://github.com/c
 
 Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands. blaude wraps it in a Linux sandbox that:
 
-- Isolates filesystem access (only your project directory is writable)
+- Isolates filesystem access (project directory, config, and caches writable; system directories read-only)
 - Drops all Linux capabilities
-- Uses separate namespaces (PID, IPC, cgroup, UTS)
+- Uses separate namespaces (PID, IPC, UTS, user)
 - Sanitizes environment variables
 - Optionally disables network access
 
