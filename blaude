@@ -393,6 +393,12 @@ if [[ -d "$HOME/.cargo/bin" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.cargo/bin" /opt/host-cargo-bin)
 fi
 
+# Bind host's go bin if it exists
+if [[ -d "$HOME/go/bin" ]]; then
+    bwrap_args+=(--dir /opt/host-go-bin)
+    bwrap_args+=(--ro-bind "$HOME/go/bin" /opt/host-go-bin)
+fi
+
 # Bind claude's data directory if it exists
 if [[ -d "$HOME/.local/share/claude" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.local/share/claude" "$HOME/.local/share/claude")
@@ -504,7 +510,7 @@ fi
 # 2. Host user binaries at /opt/host-* (read-only, for uv, node, etc.)
 # 3. NVM node binaries if available
 # 4. System directories
-sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/opt/host-bin:/opt/host-cargo-bin"
+sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/opt/host-bin:/opt/host-cargo-bin:/opt/host-go-bin"
 # Add NVM bin directory if NVM is installed (for npx, node, npm)
 if [[ -n "${NVM_BIN:-}" ]]; then
     sandbox_path="$sandbox_path:$NVM_BIN"
