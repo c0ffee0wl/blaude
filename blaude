@@ -633,9 +633,9 @@ if [[ "$keep_env_mode" != true ]]; then
         fi
     done
 
-    # Auto-passthrough any *_WEBHOOK environment variables
+    # Auto-passthrough any *_WEBHOOK and WEBSHARE_* environment variables
     while IFS='=' read -r name value; do
-        [[ "$name" == *_WEBHOOK ]] && bwrap_args+=(--setenv "$name" "$value")
+        [[ "$name" == *_WEBHOOK || "$name" == WEBSHARE_* ]] && bwrap_args+=(--setenv "$name" "$value")
     done < <(env)
 
     # D-Bus session bus address (only with --keyring flag)

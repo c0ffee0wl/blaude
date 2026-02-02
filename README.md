@@ -198,6 +198,7 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/settings
 | **claudechic** | `CLAUDECHIC_DEBUG`, `CLAUDECHIC_REMOTE_PORT`, `CHIC_PROFILE`, `CHIC_SAMPLE_THRESHOLD` |
 | **notebooklm-mcp** | `NOTEBOOKLM_COOKIES`, `NOTEBOOKLM_CSRF_TOKEN`, `NOTEBOOKLM_SESSION_ID`, `NOTEBOOKLM_MCP_*` |
 | **Webhooks** | Any variable ending in `_WEBHOOK` (e.g., `SLACK_WEBHOOK`, `DISCORD_WEBHOOK`) |
+| **Webshare** | Any variable starting with `WEBSHARE_` (e.g., `WEBSHARE_API_KEY`, `WEBSHARE_PROXY`) |
 
 Use `--env KEY=VALUE` to pass additional variables not in this list.
 

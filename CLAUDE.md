@@ -142,6 +142,10 @@ The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a 
 - `CHIC_PROFILE` - CPU profiling toggle
 - `CHIC_SAMPLE_THRESHOLD` - CPU sampling threshold
 
+**Auto-passthrough patterns (Lines 636-639):**
+- `*_WEBHOOK` - Any variable ending in `_WEBHOOK` (e.g., `SLACK_WEBHOOK`)
+- `WEBSHARE_*` - Any variable starting with `WEBSHARE_` (e.g., `WEBSHARE_API_KEY`, `WEBSHARE_PROXY`)
+
 ## User Config Directory
 
 The entire `~/.config/` directory is mounted read-write if it exists. This consolidates configuration access for multiple tools:
