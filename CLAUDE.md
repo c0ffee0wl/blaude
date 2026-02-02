@@ -60,14 +60,14 @@ The script builds a complex `bwrap` command with these isolation layers:
 ## Important Implementation Details
 
 - **Line 25**: Commands that bypass sandbox (`update`, `install`, `install-github-app`) - these need write access outside sandbox
-- **Lines 93-116**: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
-- **Lines 120-140**: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
-- **Lines 399-415**: Additional mount handling with `:rw` suffix parsing for read-write mounts
-- **Lines 496-547**: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included
+- **Lines 121-143**: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
+- **Lines 147-156**: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
+- **Lines 464-482**: Additional mount handling with `:rw` suffix parsing for read-write mounts
+- **Lines 567-627**: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included
 
 ## WSL2/systemd resolv.conf Handling
 
-Lines 148-228 handle a tricky issue where `/etc/resolv.conf` is a symlink (common in WSL2 with systemd or systemd-resolved):
+Lines 180-262 handle a tricky issue where `/etc/resolv.conf` is a symlink (common in WSL2 with systemd or systemd-resolved):
 
 - bwrap's `--file` and bind mounts follow symlinks
 - If `/etc/resolv.conf` -> `/run/systemd/resolve/stub-resolv.conf`, bwrap tries to create the file at the symlink target
@@ -81,7 +81,7 @@ Reference: https://github.com/containers/bubblewrap/issues/390
 
 ## npm-linked Packages Auto-detection
 
-Lines 320-347 automatically detect and mount npm-linked packages:
+Lines 353-386 automatically detect and mount npm-linked packages:
 
 - Scans `~/.nvm/versions/*/node_modules/` for symlinks pointing outside `~/.nvm`
 - Resolves symlinks to find package root (directory with `package.json`)
@@ -92,7 +92,7 @@ This enables MCP servers installed via `npm link` to work inside the sandbox.
 
 ## MCP Server Token File Persistence
 
-Lines 336-350 handle token storage for npm-linked MCP servers:
+Lines 376-384 handle token storage for npm-linked MCP servers:
 
 - Token files (`.token-cache.json`, `.selected-account.json`) are at **package root**, not `$HOME`
 - For npm-linked packages, these files are mounted read-write over the read-only package mount
@@ -105,13 +105,13 @@ Lines 336-350 handle token storage for npm-linked MCP servers:
 
 ## D-Bus and GNOME Keyring Support (optional)
 
-Enabled with `--keyring` flag. Lines 204-222 and 263-271 handle D-Bus/keyring:
+Enabled with `--keyring` flag. Lines 236-252 and 294-302 handle D-Bus/keyring:
 
 | Component | Lines | Purpose |
 |-----------|-------|---------|
-| D-Bus socket | 204-222 | Parses `DBUS_SESSION_BUS_ADDRESS`, binds session socket |
-| Keyrings dir | 263-271 | Binds `~/.local/share/keyrings` read-write |
-| Env passthrough | 558-560 | Passes `DBUS_SESSION_BUS_ADDRESS` to sandbox |
+| D-Bus socket | 236-252 | Parses `DBUS_SESSION_BUS_ADDRESS`, binds session socket |
+| Keyrings dir | 294-302 | Binds `~/.local/share/keyrings` read-write |
+| Env passthrough | 641-644 | Passes `DBUS_SESSION_BUS_ADDRESS` to sandbox |
 
 **When to use `--keyring`**:
 - You have GNOME Keyring properly configured
@@ -142,30 +142,16 @@ The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a 
 - `CHIC_PROFILE` - CPU profiling toggle
 - `CHIC_SAMPLE_THRESHOLD` - CPU sampling threshold
 
-## Google Chrome Profile Support
+## User Config Directory
 
-If `~/.config/google-chrome/` exists, it's mounted read-write for:
-- Browser automation (Puppeteer, Playwright)
-- Browser-based OAuth flows
-- MCP servers requiring Chrome access
+The entire `~/.config/` directory is mounted read-write if it exists. This consolidates configuration access for multiple tools:
 
-Not created automatically - only mounted if already present.
+**Key configs included:**
+- `~/.config/uv/uv.toml` - uv Python preference (e.g., `python-preference = "system"`)
+- `~/.config/fabric/` - Fabric patterns, sessions, contexts, strategies, extensions, `.env`, OAuth tokens
+- `~/.config/google-chrome/` - Chrome profile for browser automation (Puppeteer, Playwright, OAuth flows)
 
-## Fabric Support
-
-[Fabric](https://github.com/danielmiessler/fabric) config directory is automatically mounted:
-
-**Mount:**
-- `~/.config/fabric/` - Config directory (read-write, created if missing)
-
-**Contents:**
-- `patterns/` - Built-in patterns
-- `sessions/` - Chat session history
-- `contexts/` - Context definitions
-- `strategies/` - Prompt strategies
-- `extensions/` - Custom extensions
-- `.env` - API keys and config
-- `.{provider}_oauth` - OAuth credentials
+Not created automatically - only mounted if already present on host.
 
 ## notebooklm-mcp Support
 

@@ -121,8 +121,7 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `/tmp` | read-write | Host's /tmp (use `--clear-tmp` for isolated tmpfs) |
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
-| `~/.config/fabric/` | read-write | Fabric patterns, sessions, contexts, config |
-| `~/.config/google-chrome/` | read-write | Chrome profile (for browser automation) |
+| `~/.config/` | read-write | User config (uv, fabric, google-chrome, etc.) |
 | `~/.notebooklm-mcp/` | read-write | notebooklm-mcp auth and Chrome profile |
 | `~/.local/bin`, `~/.local/share/claude` | read-only | Claude binary and data |
 | `~/.cache`, `~/go`, `~/.cargo`, `~/.npm` | ephemeral | Package manager caches (cleared on exit) |
@@ -148,19 +147,14 @@ blaude --chic -c           # Continue conversation via claudechic
 
 Config file (`~/.claude/.claudechic.yaml`) is writable via the `~/.claude` mount.
 
-## Google Chrome Profile
+## User Config Directory
 
-If `~/.config/google-chrome/` exists, it's automatically mounted read-write. This enables:
+The entire `~/.config/` directory is mounted read-write if it exists. This includes:
 
-- Browser automation tools (Puppeteer, Playwright)
-- Browser-based OAuth authentication flows
-- MCP servers that need Chrome/Chromium access
-
-The directory is only mounted if it already exists (not created automatically).
-
-## Fabric Support
-
-[Fabric](https://github.com/danielmiessler/fabric) is an AI augmentation framework. blaude automatically mounts `~/.config/fabric/` for full functionality:
+- **uv config** (`~/.config/uv/uv.toml`) - Python preference settings (e.g., `python-preference = "system"`)
+- **Fabric** (`~/.config/fabric/`) - Patterns, sessions, contexts, strategies, extensions, OAuth tokens, `.env`
+- **Google Chrome** (`~/.config/google-chrome/`) - Browser profile for automation (Puppeteer, Playwright, OAuth flows)
+- Other tool configurations as needed
 
 ```bash
 # Setup fabric outside sandbox first
@@ -169,8 +163,6 @@ fabric --setup
 # Then use normally inside sandbox
 blaude --exec fabric -p "summarize"
 ```
-
-The directory stores patterns, sessions, contexts, strategies, extensions, OAuth tokens, and `.env` configuration.
 
 ## notebooklm-mcp Support
 
