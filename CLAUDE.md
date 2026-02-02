@@ -125,7 +125,7 @@ Enabled with `--keyring` flag. Lines 236-252 and 294-302 handle D-Bus/keyring:
 
 ## claudechic Support
 
-The `--chic` flag runs [claudechic](https://github.com/c0ffee0wl/claudechic) (a Python-based TUI wrapper) instead of bare Claude Code:
+The `--chic` flag runs [claudechic](https://github.com/mrocklin/claudechic) (a Python-based TUI wrapper) instead of bare Claude Code:
 
 ```bash
 ./blaude --chic              # Run claudechic in sandbox
@@ -204,5 +204,5 @@ WSL2 is auto-detected via `/proc/sys/kernel/osrelease` or `/proc/version` (check
 - Claude Code installed and in PATH
 - Optional: `jq` for config file merging
 - Optional: GNOME Keyring / D-Bus session for `--keyring` support
-- Optional: [claudechic](https://github.com/c0ffee0wl/claudechic) for `--chic` mode
+- Optional: [claudechic](https://github.com/mrocklin/claudechic) for `--chic` mode
 - Optional: [notebooklm-mcp-cli](https://github.com/jacob-bd/notebooklm-mcp-cli) for NotebookLM integration

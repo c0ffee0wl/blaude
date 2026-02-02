@@ -104,7 +104,7 @@ blaude --exec bash
 | `--ssh` | Mount SSH keys and forward agent |
 | `--no-network` | Disable network access |
 | `--keyring` | Enable GNOME Keyring access (for keytar) |
-| `--chic` | Run [claudechic](https://github.com/c0ffee0wl/claudechic) TUI instead of claude |
+| `--chic` | Run [claudechic](https://github.com/mrocklin/claudechic) TUI instead of claude |
 | `--tmp` | Run isolated in /tmp |
 | `--clear-tmp` | Use empty tmpfs for /tmp instead of mounting host's /tmp |
 | `--debug` | Show bwrap command before executing |
@@ -138,7 +138,7 @@ If you have GNOME Keyring properly configured (unlocked at login), use `--keyrin
 
 ## claudechic Support
 
-[claudechic](https://github.com/c0ffee0wl/claudechic) is a Python-based TUI wrapper for Claude Code. Use `--chic` to run it inside the sandbox:
+[claudechic](https://github.com/mrocklin/claudechic) is a Python-based TUI wrapper for Claude Code. Use `--chic` to run it inside the sandbox:
 
 ```bash
 blaude --chic              # Run claudechic in sandbox
