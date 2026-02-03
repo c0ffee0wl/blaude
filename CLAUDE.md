@@ -184,6 +184,11 @@ nlm login --profile work       # Named profile
 
 WSL2 is auto-detected via `/proc/sys/kernel/osrelease` or `/proc/version` (checks for "microsoft").
 
+**Session caching:**
+- WSL detection is cached in `/tmp/blaude-wsl-$UID` to avoid repeated proc checks
+- Cache drop status is tracked in `/tmp/blaude-dropped-caches-$UID` (only drops once per session)
+- Both caches are cleared on reboot (tmpfs)
+
 **Known issues:**
 - WSL2's 9P filesystem (drvfs) can have race conditions with file operations
 - File operations may fail with `ENOENT: no such file or directory, statx`
@@ -191,7 +196,7 @@ WSL2 is auto-detected via `/proc/sys/kernel/osrelease` or `/proc/version` (check
 
 **Workarounds applied:**
 - `sync` is called before sandbox execution to flush pending filesystem operations
-- Filesystem caches are dropped (`echo 2 > /proc/sys/vm/drop_caches`) to clear stale negative dentries
+- Filesystem caches are dropped via `sudo sh -c 'echo 2 > /proc/sys/vm/drop_caches'` (requires sudo; only runs once per session)
 - `sync` is called on exit via trap
 
 **If issues persist:**

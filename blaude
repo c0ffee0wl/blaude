@@ -47,10 +47,17 @@ chic_mode=false
 clear_tmp_mode=false
 
 # Auto-detect WSL (check both osrelease and /proc/version for robustness)
-wsl_mode=false
-if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || \
-   grep -qi microsoft /proc/version 2>/dev/null; then
-    wsl_mode=true
+# Cache result in /tmp to avoid repeated proc checks within a session
+wsl_cache="/tmp/blaude-wsl-${UID:-$(id -u)}"
+if [[ -f "$wsl_cache" ]]; then
+    wsl_mode=$(cat "$wsl_cache")
+else
+    wsl_mode=false
+    if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || \
+       grep -qi microsoft /proc/version 2>/dev/null; then
+        wsl_mode=true
+    fi
+    echo "$wsl_mode" > "$wsl_cache" 2>/dev/null || true
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -722,9 +729,12 @@ if [[ "$wsl_mode" == true ]]; then
     sync
     # Drop dentries and inodes to clear stale negative dentry cache
     # This helps prevent spurious ENOENT errors from cached "file not found" results
-    # Only write if not already set to 2 (avoids unnecessary sudo prompt)
-    if [[ "$(cat /proc/sys/vm/drop_caches 2>/dev/null)" != "2" ]]; then
+    # Note: reading /proc/sys/vm/drop_caches requires sudo and always returns 0 anyway
+    # Use a session marker file to only drop caches once per session
+    drop_cache_marker="/tmp/blaude-dropped-caches-${UID:-$(id -u)}"
+    if [[ ! -f "$drop_cache_marker" ]]; then
         sudo sh -c 'echo 2 > /proc/sys/vm/drop_caches' 2>/dev/null || true
+        touch "$drop_cache_marker" 2>/dev/null || true
     fi
     trap 'sync' EXIT
     exec bwrap "${bwrap_args[@]}"
