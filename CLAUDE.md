@@ -157,6 +157,12 @@ The entire `~/.config/` directory is mounted read-write if it exists. This conso
 
 Not created automatically - only mounted if already present on host.
 
+## arxiv-storage Directory
+
+The `~/arxiv-storage/` directory is mounted read-write if it exists. This is for research paper management tools that download and organize arxiv papers.
+
+Not created automatically - only mounted if already present on host.
+
 ## notebooklm-mcp Support
 
 The [notebooklm-mcp-cli](https://github.com/jacob-bd/notebooklm-mcp-cli) MCP server is supported with auth persistence:

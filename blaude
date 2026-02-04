@@ -449,6 +449,11 @@ if [[ -d "$HOME/.config" ]]; then
     bwrap_args+=(--bind "$HOME/.config" "$HOME/.config")
 fi
 
+# arxiv-storage directory (for research paper management tools)
+if [[ -d "$HOME/arxiv-storage" ]]; then
+    bwrap_args+=(--bind "$HOME/arxiv-storage" "$HOME/arxiv-storage")
+fi
+
 # Network isolation
 if [[ "$no_network" == true ]]; then
     bwrap_args+=(--unshare-net)
