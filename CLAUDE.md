@@ -62,8 +62,9 @@ The script builds a complex `bwrap` command with these isolation layers:
 - **Line 25**: Commands that bypass sandbox (`update`, `install`, `install-github-app`) - these need write access outside sandbox
 - **Lines 121-143**: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
 - **Lines 147-156**: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
-- **Lines 464-482**: Additional mount handling with `:rw` suffix parsing for read-write mounts
-- **Lines 567-627**: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included
+- **Lines 464-482**: Git mode mounts `.gitconfig`/`.git-credentials` AND passes `GH_TOKEN`/`GITHUB_TOKEN` (all gated behind `--git`)
+- **Lines 490-508**: Additional mount handling with `:rw` suffix parsing for read-write mounts
+- **Lines 585-643**: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included (except GitHub tokens, which require `--git`)
 
 ## WSL2/systemd resolv.conf Handling
 
@@ -160,6 +161,18 @@ Not created automatically - only mounted if already present on host.
 ## arxiv-storage Directory
 
 The `~/arxiv-storage/` directory is mounted read-write if it exists. This is for research paper management tools that download and organize arxiv papers.
+
+Not created automatically - only mounted if already present on host.
+
+## Claude Memory Directory
+
+The `~/.claude-mem/` directory is mounted read-write if it exists. This provides persistent memory storage across sandbox sessions.
+
+Not created automatically - only mounted if already present on host.
+
+## Bun Runtime
+
+The `~/.bun/` directory is mounted read-only if it exists. This provides access to the Bun JavaScript runtime and packages installed via `bun`. `~/.bun/bin` is included in the sandbox PATH.
 
 Not created automatically - only mounted if already present on host.
 

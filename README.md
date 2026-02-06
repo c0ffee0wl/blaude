@@ -100,7 +100,7 @@ blaude --exec bash
 |--------|-------------|
 | `--env KEY=VALUE` | Set environment variable in sandbox |
 | `-m, --mount PATH` | Mount directory (append `:rw` for read-write) |
-| `--git` | Mount git config for committing |
+| `--git` | Mount git config and pass `GH_TOKEN`/`GITHUB_TOKEN` |
 | `--ssh` | Mount SSH keys and forward agent |
 | `--no-network` | Disable network access |
 | `--keyring` | Enable GNOME Keyring access (for keytar) |
@@ -123,6 +123,8 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
 | `~/.config/` | read-write | User config (uv, fabric, google-chrome, etc.) |
 | `~/.notebooklm-mcp/` | read-write | notebooklm-mcp auth and Chrome profile |
+| `~/.claude-mem/` | read-write | Persistent memory across sessions |
+| `~/.bun/` | read-only | Bun runtime and packages (`~/.bun/bin` in PATH) |
 | `~/.local/bin`, `~/.local/share/claude` | read-only | Claude binary and data |
 | `~/.cache`, `~/go`, `~/.cargo`, `~/.npm` | ephemeral | Package manager caches (cleared on exit) |
 
@@ -193,7 +195,7 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/settings
 | **UI/Display** | `CLAUDE_CODE_HIDE_ACCOUNT_INFO`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`, `IS_DEMO`, `DISABLE_COST_WARNINGS` |
 | **Advanced** | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `DISABLE_PROMPT_CACHING*`, `SLASH_COMMAND_TOOL_CHAR_BUDGET` |
 | **Proxy** | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `CLAUDE_CODE_PROXY_RESOLVES_HOSTS` |
-| **GitHub** | `GH_TOKEN`, `GITHUB_TOKEN` |
+| **GitHub** (requires `--git`) | `GH_TOKEN`, `GITHUB_TOKEN` |
 | **Other LLM APIs** | `OPENAI_API_KEY`, `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `XAI_API_KEY`, `JINA_API_KEY`, etc. |
 | **claudechic** | `CLAUDECHIC_DEBUG`, `CLAUDECHIC_REMOTE_PORT`, `CHIC_PROFILE`, `CHIC_SAMPLE_THRESHOLD` |
 | **notebooklm-mcp** | `NOTEBOOKLM_COOKIES`, `NOTEBOOKLM_CSRF_TOKEN`, `NOTEBOOKLM_SESSION_ID`, `NOTEBOOKLM_MCP_*` |

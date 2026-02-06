@@ -454,12 +454,22 @@ if [[ -d "$HOME/arxiv-storage" ]]; then
     bwrap_args+=(--bind "$HOME/arxiv-storage" "$HOME/arxiv-storage")
 fi
 
+# Claude memory directory (for persistent memory across sessions)
+if [[ -d "$HOME/.claude-mem" ]]; then
+    bwrap_args+=(--bind "$HOME/.claude-mem" "$HOME/.claude-mem")
+fi
+
+# Bun runtime and package manager
+if [[ -d "$HOME/.bun" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.bun" "$HOME/.bun")
+fi
+
 # Network isolation
 if [[ "$no_network" == true ]]; then
     bwrap_args+=(--unshare-net)
 fi
 
-# Git mode: mount git configuration files
+# Git mode: mount git configuration files and pass GitHub tokens
 if [[ "$git_mode" == true ]]; then
     if [[ -f "$HOME/.gitconfig" ]]; then
         bwrap_args+=(--ro-bind "$HOME/.gitconfig" "$HOME/.gitconfig")
@@ -467,6 +477,12 @@ if [[ "$git_mode" == true ]]; then
     if [[ -f "$HOME/.git-credentials" ]]; then
         bwrap_args+=(--ro-bind "$HOME/.git-credentials" "$HOME/.git-credentials")
     fi
+    # GitHub tokens (for gh CLI, git push/pull, MCP servers)
+    for var in GH_TOKEN GITHUB_TOKEN; do
+        if [[ -n "${!var:-}" ]]; then
+            bwrap_args+=(--setenv "$var" "${!var}")
+        fi
+    done
 fi
 
 # SSH mode: mount SSH keys and forward SSH agent
@@ -522,7 +538,7 @@ fi
 # 2. Host user binaries at /opt/host-* (read-only, for uv, node, etc.)
 # 3. NVM node binaries if available
 # 4. System directories
-sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:/opt/host-bin:/opt/host-cargo-bin:/opt/host-go-bin"
+sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:/opt/host-bin:/opt/host-cargo-bin:/opt/host-go-bin"
 # Add NVM bin directory if NVM is installed (for npx, node, npm)
 if [[ -n "${NVM_BIN:-}" ]]; then
     sandbox_path="$sandbox_path:$NVM_BIN"
@@ -626,8 +642,6 @@ claude_env_vars=(
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
     # Network & Proxy
     HTTP_PROXY HTTPS_PROXY NO_PROXY CLAUDE_CODE_PROXY_RESOLVES_HOSTS
-    # GitHub (for gh CLI, git operations, MCP servers)
-    GH_TOKEN GITHUB_TOKEN
     # Additional LLM API keys (for MCP servers and tools that may use them)
     OPENAI_API_KEY OPENAI_API_BASE OPENAI_ORG_ID
     AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION
