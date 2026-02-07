@@ -64,7 +64,7 @@ The script builds a complex `bwrap` command with these isolation layers:
 - **Lines 147-156**: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
 - **Lines 464-482**: Git mode mounts `.gitconfig`/`.git-credentials` AND passes `GH_TOKEN`/`GITHUB_TOKEN` (all gated behind `--git`)
 - **Lines 490-508**: Additional mount handling with `:rw` suffix parsing for read-write mounts
-- **Lines 585-643**: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included (except GitHub tokens, which require `--git`)
+- **Lines 585-666**: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included (except GitHub tokens, which require `--git`)
 
 ## WSL2/systemd resolv.conf Handling
 
