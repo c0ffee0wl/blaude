@@ -125,6 +125,12 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Post-parsing bypass: catch install/update commands after blaude flags
+# (e.g., "./blaude --debug install" where $1 was --debug, not install)
+if [[ ${#command_args[@]} -gt 0 && "${command_args[0]}" =~ ^(update|install|install-github-app)$ ]]; then
+    exec claude "${command_args[@]}"
+fi
+
 # --- Ensure Claude config has required flags ---
 
 # Respect CLAUDE_CONFIG_DIR if set, otherwise use default
@@ -407,8 +413,10 @@ if [[ -d "$HOME/go/bin" ]]; then
 fi
 
 # Bind claude's data directory if it exists
+# Mounted read-write so the autoupdater can write to versions/ if it runs despite
+# DISABLE_AUTOUPDATER=1 (prevents EROFS errors on copyfile to versions/*.tmp.*)
 if [[ -d "$HOME/.local/share/claude" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.local/share/claude" "$HOME/.local/share/claude")
+    bwrap_args+=(--bind "$HOME/.local/share/claude" "$HOME/.local/share/claude")
 fi
 
 # Ensure config directory exists on host and create mount point inside sandbox
