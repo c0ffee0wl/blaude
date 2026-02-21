@@ -62,9 +62,10 @@ The script builds a complex `bwrap` command with these isolation layers:
 - **Line 25**: Commands that bypass sandbox (`update`, `install`, `install-github-app`) - these need write access outside sandbox
 - **Lines 121-143**: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
 - **Lines 147-156**: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
-- **Lines 464-482**: Git mode mounts `.gitconfig`/`.git-credentials` AND passes `GH_TOKEN`/`GITHUB_TOKEN` (all gated behind `--git`)
-- **Lines 490-508**: Additional mount handling with `:rw` suffix parsing for read-write mounts
-- **Lines 585-666**: Claude Code environment variable passthrough array - all official env vars from https://code.claude.com/docs/en/settings are included (except GitHub tokens, which require `--git`)
+- **Git mode** (`--git`): mounts `.gitconfig`/`.git-credentials` AND passes `GH_TOKEN`/`GITHUB_TOKEN`
+- **AWS mode** (`--aws`): mounts `~/.aws/` read-only for Bedrock authentication (SSO, credentials, config); also mounts `GOOGLE_APPLICATION_CREDENTIALS` file if set
+- **Additional mount handling**: `:rw` suffix parsing for read-write mounts
+- **Claude Code environment variable passthrough array**: all official env vars from https://code.claude.com/docs/en/settings are included, plus OpenTelemetry, Vertex AI, and LLM gateway vars (GitHub tokens require `--git`; AWS config dir requires `--aws`)
 
 ## WSL2/systemd resolv.conf Handling
 
@@ -123,6 +124,25 @@ Enabled with `--keyring` flag. Lines 236-252 and 294-302 handle D-Bus/keyring:
 - Supports `unix:path=/run/user/$UID/bus` format
 - Warns about abstract sockets (don't work with namespaces)
 - Falls back to standard systemd path
+
+## AWS/Cloud Mode
+
+The `--aws` flag mounts cloud provider credentials into the sandbox:
+
+```bash
+./blaude --aws              # Mount ~/.aws/ for Bedrock authentication
+```
+
+**Mounts:**
+- `~/.aws/` - AWS config and credentials directory (read-only)
+- `GOOGLE_APPLICATION_CREDENTIALS` file - GCP service account key (read-only, if env var is set)
+
+**When to use `--aws`**:
+- Using Amazon Bedrock with `aws configure` or `aws sso login` credentials
+- Using `AWS_PROFILE` that references `~/.aws/config`
+- Using a GCP service account key file for Vertex AI
+
+**Note**: AWS environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, etc.) are always passed through when set, regardless of `--aws`. The flag is only needed for file-based credentials in `~/.aws/`.
 
 ## claudechic Support
 
