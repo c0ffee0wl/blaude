@@ -781,14 +781,16 @@ if [[ "$dry_run" == true ]]; then
 fi
 
 # WSL2 workarounds: mitigate 9P/drvfs race conditions
-# References:
-#   - https://github.com/microsoft/WSL/issues/2780 (ENOENT with concurrent file ops)
+# The 9P filesystem used for /mnt/* host mounts has known bugs (still unfixed):
 #   - https://github.com/microsoft/WSL/issues/8443 (fstat ENOENT after rename)
+#   - https://github.com/microsoft/WSL/issues/13105 (follow-up, still open)
+# The only reliable fix is to use the native ext4 filesystem (/home/...) instead.
 if [[ "$wsl_mode" == true ]]; then
-    [[ "$debug" == true ]] && echo "WSL2 detected: dropping caches" >&2
+    [[ "$debug" == true ]] && echo "WSL2 detected: applying workarounds" >&2
 
-    # Warn if workspace is on Windows filesystem (9P) - prone to ENOENT race conditions
-    if [[ "$current_dir" == /mnt/* ]]; then
+    # Warn if workspace is on Windows filesystem (9P) - once per session
+    wsl_mnt_warned="/tmp/blaude-mnt-warned-${UID:-$(id -u)}"
+    if [[ "$current_dir" == /mnt/* && ! -f "$wsl_mnt_warned" ]]; then
         echo "Warning: Workspace is on Windows filesystem (/mnt/*)." >&2
         echo "  WSL2's 9P protocol has known bugs causing spurious ENOENT errors." >&2
         echo "  For best reliability, move your project to the Linux filesystem:" >&2
@@ -796,18 +798,10 @@ if [[ "$wsl_mode" == true ]]; then
         echo "" >&2
         read -n 1 -s -r -p "Press any key to continue..." >&2
         echo "" >&2
+        touch "$wsl_mnt_warned" 2>/dev/null || true
     fi
 
     sync
-    # Drop dentries and inodes to clear stale negative dentry cache
-    # This helps prevent spurious ENOENT errors from cached "file not found" results
-    # Note: reading /proc/sys/vm/drop_caches requires sudo and always returns 0 anyway
-    # Use a session marker file to only drop caches once per session
-    drop_cache_marker="/tmp/blaude-dropped-caches-${UID:-$(id -u)}"
-    if [[ ! -f "$drop_cache_marker" ]]; then
-        sudo sh -c 'echo 2 > /proc/sys/vm/drop_caches' 2>/dev/null || true
-        touch "$drop_cache_marker" 2>/dev/null || true
-    fi
     trap 'sync' EXIT
     exec bwrap "${bwrap_args[@]}"
 fi

@@ -225,17 +225,17 @@ WSL2 is auto-detected via `/proc/sys/kernel/osrelease` or `/proc/version` (check
 
 **Session caching:**
 - WSL detection is cached in `/tmp/blaude-wsl-$UID` to avoid repeated proc checks
-- Cache drop status is tracked in `/tmp/blaude-dropped-caches-$UID` (only drops once per session)
-- Both caches are cleared on reboot (tmpfs)
+- `/mnt/*` warning is shown once per session (tracked via `/tmp/blaude-mnt-warned-$UID`)
+- Caches are cleared on reboot (tmpfs)
 
 **Known issues:**
-- WSL2's 9P filesystem (drvfs) can have race conditions with file operations
-- File operations may fail with `ENOENT: no such file or directory, statx`
-- Related issues: [#2780](https://github.com/microsoft/WSL/issues/2780), [#8443](https://github.com/microsoft/WSL/issues/8443)
+- WSL2's 9P filesystem (drvfs) has unfixed bugs causing `ENOENT` errors after `rename()`/`fstat()`
+- Related issues: [#8443](https://github.com/microsoft/WSL/issues/8443), [#13105](https://github.com/microsoft/WSL/issues/13105) (still open)
+- Only affects `/mnt/*` paths (9P); native ext4 filesystem (`/home/...`) is not affected
 
 **Workarounds applied:**
+- Warning shown (once per session) when workspace is on `/mnt/*`
 - `sync` is called before sandbox execution to flush pending filesystem operations
-- Filesystem caches are dropped via `sudo sh -c 'echo 2 > /proc/sys/vm/drop_caches'` (requires sudo; only runs once per session)
 - `sync` is called on exit via trap
 
 **If issues persist:**
