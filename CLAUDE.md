@@ -60,12 +60,26 @@ The script builds a complex `bwrap` command with these isolation layers:
 ## Important Implementation Details
 
 - **Line 25**: Commands that bypass sandbox (`update`, `install`, `install-github-app`) - these need write access outside sandbox
+- **Lines 29-62**: `fix-apparmor` subcommand - installs AppArmor profile for bwrap on Ubuntu 24.04+ (requires sudo)
 - **Lines 121-143**: Auto-configures `~/.claude/.claude.json` with required flags for `--dangerously-skip-permissions`
 - **Lines 147-156**: Core bwrap security options (note: `--new-session` intentionally removed for MCP server signal propagation)
 - **Git mode** (`--git`): mounts `.gitconfig`/`.git-credentials` AND passes `GH_TOKEN`/`GITHUB_TOKEN`
 - **AWS mode** (`--aws`): mounts `~/.aws/` read-only for Bedrock authentication (SSO, credentials, config); also mounts `GOOGLE_APPLICATION_CREDENTIALS` file if set
 - **Additional mount handling**: `:rw` suffix parsing for read-write mounts
 - **Claude Code environment variable passthrough array**: all official env vars from https://code.claude.com/docs/en/settings are included, plus OpenTelemetry, Vertex AI, and LLM gateway vars (GitHub tokens require `--git`; AWS config dir requires `--aws`)
+
+## AppArmor User Namespace Restriction (Ubuntu 24.04+)
+
+Ubuntu 24.04+ enables `apparmor_restrict_unprivileged_userns` by default, which blocks bwrap from creating user namespaces. blaude handles this in two ways:
+
+1. **Startup detection**: Before executing bwrap, checks if AppArmor restriction is active and no bwrap profile exists. Prints a warning with fix instructions.
+2. **`fix-apparmor` subcommand**: Installs a minimal AppArmor profile at `/etc/apparmor.d/bwrap` that grants bwrap the `userns` permission. Runs with `sudo`, idempotent.
+
+**Detection conditions** (all must be true to trigger warning):
+- `apparmor_parser` command exists
+- `/sys/module/apparmor` directory exists (AppArmor loaded)
+- `/proc/sys/kernel/apparmor_restrict_unprivileged_userns` is "1"
+- `/etc/apparmor.d/bwrap` does NOT exist
 
 ## WSL2/systemd resolv.conf Handling
 

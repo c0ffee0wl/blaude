@@ -26,6 +26,46 @@ if [[ "${1:-}" =~ ^(update|install|install-github-app)$ ]]; then
     exec claude "$@"
 fi
 
+# fix-apparmor: install AppArmor profile to allow bwrap user namespaces (Ubuntu 24.04+)
+if [[ "${1:-}" == "fix-apparmor" ]]; then
+    if ! command -v apparmor_parser &>/dev/null || [[ ! -d /sys/module/apparmor ]]; then
+        echo "AppArmor is not active on this system. No fix needed." >&2
+        exit 0
+    fi
+    if [[ -f /etc/apparmor.d/bwrap ]]; then
+        echo "AppArmor bwrap profile already exists at /etc/apparmor.d/bwrap" >&2
+        exit 0
+    fi
+    if [[ ! -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] || \
+       [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" != "1" ]]; then
+        echo "Unprivileged user namespaces are not restricted. No fix needed." >&2
+        exit 0
+    fi
+    echo "Installing AppArmor profile for bwrap..."
+    if sudo tee /etc/apparmor.d/bwrap > /dev/null <<'APPARMOR'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+APPARMOR
+    then
+        if sudo apparmor_parser -r /etc/apparmor.d/bwrap; then
+            echo "AppArmor bwrap profile installed and loaded successfully."
+        else
+            echo "Error: Failed to load AppArmor bwrap profile." >&2
+            exit 1
+        fi
+    else
+        echo "Error: Failed to write AppArmor bwrap profile (sudo required)." >&2
+        exit 1
+    fi
+    exit 0
+fi
+
 current_dir=$(pwd)
 dir_name=$(basename "$current_dir")
 # Sanitize directory name (colons can cause issues in some contexts)
@@ -778,6 +818,19 @@ fi
 
 if [[ "$dry_run" == true ]]; then
     exit 0
+fi
+
+# Detect AppArmor user namespace restriction (Ubuntu 24.04+)
+# bwrap needs user namespaces, which AppArmor may block by default
+if command -v apparmor_parser &>/dev/null && \
+   [[ -d /sys/module/apparmor ]] && \
+   [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] && \
+   [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == "1" ]] && \
+   [[ ! -f /etc/apparmor.d/bwrap ]]; then
+    echo "Warning: AppArmor is restricting unprivileged user namespaces." >&2
+    echo "  bwrap may fail with 'Operation not permitted' on this system." >&2
+    echo "  Fix with: blaude fix-apparmor" >&2
+    echo "" >&2
 fi
 
 # WSL2 workarounds: mitigate 9P/drvfs race conditions

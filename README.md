@@ -110,6 +110,7 @@ blaude --exec bash
 | `--debug` | Show bwrap command before executing |
 | `--dry-run` | Show command without executing |
 | `--exec CMD` | Run CMD instead of claude |
+| `fix-apparmor` | Install AppArmor profile for bwrap (Ubuntu 24.04+, requires sudo) |
 
 All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to claude.
 
@@ -206,6 +207,33 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/settings
 | **Webshare** | Any variable starting with `WEBSHARE_` (e.g., `WEBSHARE_API_KEY`, `WEBSHARE_PROXY`) |
 
 Use `--env KEY=VALUE` to pass additional variables not in this list.
+
+## Troubleshooting
+
+### Ubuntu 24.04+: "Operation not permitted"
+
+Ubuntu 24.04+ restricts unprivileged user namespaces via AppArmor by default. Since bwrap relies on user namespaces, blaude will fail with `Operation not permitted` or similar errors.
+
+blaude detects this automatically and prints a warning. To fix:
+
+```bash
+blaude fix-apparmor
+```
+
+This installs an AppArmor profile at `/etc/apparmor.d/bwrap` that allows bwrap to create user namespaces (requires sudo). The profile is minimal:
+
+```
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+
+  include if exists <local/bwrap>
+}
+```
+
+You only need to run this once. The fix is idempotent — running it again is a no-op.
 
 ## License
 
