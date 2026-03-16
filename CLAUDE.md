@@ -66,7 +66,8 @@ The script builds a complex `bwrap` command with these isolation layers:
 - **Git mode** (`--git`): mounts `.gitconfig`/`.git-credentials` AND passes `GH_TOKEN`/`GITHUB_TOKEN`
 - **AWS mode** (`--aws`): mounts `~/.aws/` read-only for Bedrock authentication (SSO, credentials, config); also mounts `GOOGLE_APPLICATION_CREDENTIALS` file if set
 - **Additional mount handling**: `:rw` suffix parsing for read-write mounts
-- **Claude Code environment variable passthrough array**: all official env vars from https://code.claude.com/docs/en/settings are included, plus OpenTelemetry, Vertex AI, and LLM gateway vars (GitHub tokens require `--git`; AWS config dir requires `--aws`)
+- **Claude Code environment variable passthrough array**: all official env vars from https://code.claude.com/docs/en/env-vars are included, plus OpenTelemetry, Vertex AI, and LLM gateway vars (GitHub tokens require `--git`; AWS config dir requires `--aws`)
+- **`CLAUDE_ENV_FILE` auto-mount**: if `CLAUDE_ENV_FILE` is set and points to an existing file, it is automatically mounted read-only into the sandbox so Claude Code can load it
 
 ## AppArmor User Namespace Restriction (Ubuntu 24.04+)
 
