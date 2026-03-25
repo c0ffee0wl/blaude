@@ -69,6 +69,9 @@ The script builds a complex `bwrap` command with these isolation layers:
 - **Claude Code environment variable passthrough array**: all official env vars from https://code.claude.com/docs/en/env-vars are included, plus OpenTelemetry, Vertex AI, and LLM gateway vars (GitHub tokens require `--git`; AWS config dir requires `--aws`)
 - **`CLAUDE_ENV_FILE` auto-mount**: if `CLAUDE_ENV_FILE` is set and points to an existing file, it is automatically mounted read-only into the sandbox so Claude Code can load it
 - **`CLAUDE_CODE_PLUGIN_SEED_DIR` auto-mount**: if `CLAUDE_CODE_PLUGIN_SEED_DIR` is set and points to an existing directory, it is automatically mounted read-only into the sandbox so Claude Code can discover seed plugins
+- **mTLS certificate auto-mount**: if `CLAUDE_CODE_CLIENT_CERT` or `CLAUDE_CODE_CLIENT_KEY` are set and point to existing files, they are automatically mounted read-only into the sandbox for mTLS authentication
+- **`AWS_WEB_IDENTITY_TOKEN_FILE` auto-mount**: if set and points to an existing file, it is automatically mounted read-only into the sandbox for AWS web identity/IRSA authentication
+- **`NODE_EXTRA_CA_CERTS` auto-mount**: if set and points to an existing file, it is automatically mounted read-only into the sandbox so Node.js can use custom CA certificates
 
 ## AppArmor User Namespace Restriction (Ubuntu 24.04+)
 
