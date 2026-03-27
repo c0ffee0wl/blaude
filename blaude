@@ -457,11 +457,10 @@ if [[ -d "$HOME/go/bin" ]]; then
     bwrap_args+=(--ro-bind "$HOME/go/bin" /opt/host-go-bin)
 fi
 
-# Bind claude's data directory if it exists
-# Mounted read-write so the autoupdater can write to versions/ if it runs despite
-# DISABLE_AUTOUPDATER=1 (prevents EROFS errors on copyfile to versions/*.tmp.*)
+# Bind claude's data directory read-only if it exists
+# DISABLE_AUTOUPDATER=1 is set below, so no write access needed
 if [[ -d "$HOME/.local/share/claude" ]]; then
-    bwrap_args+=(--bind "$HOME/.local/share/claude" "$HOME/.local/share/claude")
+    bwrap_args+=(--ro-bind "$HOME/.local/share/claude" "$HOME/.local/share/claude")
 fi
 
 # Ensure config directory exists on host and create mount point inside sandbox
