@@ -94,3 +94,31 @@ If blaude is fully up-to-date (no missing vars), say so clearly at the top of th
 Add approved vars to the `claude_env_vars` array in the correct category section. Match the existing formatting style (space-separated on lines, grouped under comment headers).
 
 For vars that need mounts, add both the passthrough AND the bind-mount logic. Follow the existing pattern in blaude (e.g., the `CLAUDE_ENV_FILE` auto-mount block) — check if the var is set and the path exists before mounting.
+
+### 7. Update README.md and CLAUDE.md
+
+After applying changes to the blaude script, update documentation to stay in sync:
+
+#### README.md — Environment Variables table
+
+The `## Environment Variables` section in README.md contains a summary table of all passthrough categories and example variables. When vars are added or removed:
+
+1. Find the matching category row in the table (e.g., `| **Features** | ... |`)
+2. Add/remove the var name from the appropriate row
+3. If a new category was added to blaude, add a new row to the table
+4. Keep table entries concise — use `VAR_PREFIX_*` wildcards where appropriate instead of listing every var
+
+#### CLAUDE.md — Environment Variable Passthrough section
+
+The `## Environment Variable Passthrough` section in CLAUDE.md lists:
+- **Hardcoded vars**: Update if a new var is hardcoded via `--setenv` in the Claude Code config block
+- **Auto-mounted file/path vars**: Update the list if a new var triggers a bind-mount (both the passthrough AND mount were added)
+
+Only update these docs for changes that were actually applied to the blaude script — do not update docs for recommendations the user declined.
+
+#### Scope of doc updates
+
+- Do NOT rewrite or restructure docs beyond the specific sections affected by the change
+- Match the existing formatting style in each file
+- For README.md, keep the env var table concise (wildcards over exhaustive lists)
+- For CLAUDE.md, keep the auto-mount list in the same inline format
