@@ -24,9 +24,14 @@ Then read:
 
 ### 2. Fetch official documentation
 
-Fetch and extract all env var names from:
-- https://code.claude.com/docs/en/env-vars (primary, env vars reference)
-- https://code.claude.com/docs/en/settings (managed settings, some overlap)
+The env-vars page is long and WebFetch often truncates it. Use this multi-fetch strategy:
+
+1. Fetch https://code.claude.com/docs/en/env-vars.md (the `.md` URL returns raw markdown, easier to parse)
+2. Note the LAST variable in the output — the page likely truncated there
+3. Fetch again asking specifically for vars AFTER that last variable
+4. Repeat until no new vars appear
+
+Optionally also fetch https://code.claude.com/docs/en/settings for managed settings overlap, but the env-vars page is the primary authoritative source.
 
 ### 3. Diff and classify
 
@@ -81,6 +86,8 @@ Flag these in the report with mount instructions.
 ```
 
 **Priority**: High = security/auth/proxy/connectivity. Medium = model config, execution. Low = UI/cosmetic.
+
+If blaude is fully up-to-date (no missing vars), say so clearly at the top of the report. Still include the "Possibly deprecated" and "Already hardcoded" sections for completeness.
 
 ### 6. Apply changes (if user approves)
 

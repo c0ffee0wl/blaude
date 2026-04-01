@@ -25,5 +25,5 @@ echo "=== AUTO-MOUNTED FILE VARS ==="
 grep -oP '(?<=\$\{)[A-Z_]+(?=\b)' "$BLAUDE" \
   | sort -u \
   | while read -r var; do
-      grep -q "$var.*--ro-bind\|--bind.*$var\|auto.*mount.*$var\|$var.*mount" "$BLAUDE" 2>/dev/null && echo "$var"
+      grep -q "$var.*--ro-bind\|--bind.*$var\|auto.*mount.*$var\|$var.*mount" "$BLAUDE" 2>/dev/null && echo "$var" || true
     done
