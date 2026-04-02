@@ -1,11 +1,11 @@
 ---
 name: update-blaude
-description: Audit and update blaude's Claude Code environment variable passthrough list, managed settings, and file/path auto-mounts against official documentation. Use when checking if blaude is up-to-date with the latest Claude Code env vars, when a new Claude Code version is released, or when asked to sync/audit/update blaude's env var list. Fetches official docs, diffs against current script, checks if new vars need file mounts, and outputs prioritized recommendations.
+description: Audit and update blaude's Claude Code environment variable passthrough list, managed settings, and file/path auto-mounts against official documentation and changelog. Use when checking if blaude is up-to-date with the latest Claude Code release, when a new version is released, or when asked to sync/audit/update blaude. Fetches the env-vars page and changelog, diffs against the current script, identifies new env vars, managed settings, sandbox-relevant changes, and deprecations, then outputs prioritized recommendations.
 ---
 
 # Update blaude
 
-Audit the `blaude` script against official Claude Code documentation and recommend updates.
+Audit the `blaude` script against official Claude Code documentation and changelog, then recommend updates.
 
 ## Workflow
 
@@ -21,8 +21,13 @@ Then read:
 - [references/hardcoded-vars.md](references/hardcoded-vars.md) — vars that must NOT be added to passthrough
 - [references/passthrough-categories.md](references/passthrough-categories.md) — array categories and intentional non-official vars
 - [references/auto-mount-vars.md](references/auto-mount-vars.md) — vars that need file/dir bind-mounts
+- [references/changelog-analysis.md](references/changelog-analysis.md) — what to look for in the changelog
 
 ### 2. Fetch official documentation
+
+Fetch both the env-vars page and the changelog. These can be fetched in parallel.
+
+#### 2a. Env-vars page
 
 The env-vars page is long and WebFetch often truncates it. Use this multi-fetch strategy:
 
@@ -31,7 +36,21 @@ The env-vars page is long and WebFetch often truncates it. Use this multi-fetch 
 3. Fetch again asking specifically for vars AFTER that last variable
 4. Repeat until no new vars appear
 
-Optionally also fetch https://code.claude.com/docs/en/settings for managed settings overlap, but the env-vars page is the primary authoritative source.
+#### 2b. Changelog
+
+Fetch https://code.claude.com/docs/en/changelog.md and extract (see [changelog-analysis.md](references/changelog-analysis.md) for detailed patterns):
+
+1. **New env vars** — entries like "Added `VAR_NAME` env var..." Cross-reference with env-vars page results.
+2. **Managed settings changes** — new settings, setting directories, or policy changes.
+3. **Sandbox-relevant changes** — new tools, hook events, file paths, protocol handlers, plugin/MCP changes.
+4. **Deprecations and removals** — vars or features removed that blaude may still reference.
+5. **Security changes** — credential scrubbing, permission hardening, auth flow changes.
+
+The changelog is the `.md` URL and returns raw markdown. It is long — focus the prompt on extracting items relevant to blaude (env vars, settings, sandbox, filesystem, security). Note the latest version number for the audit report.
+
+#### 2c. Settings page (optional)
+
+Fetch https://code.claude.com/docs/en/settings for managed settings overlap, but the env-vars page is the primary authoritative source.
 
 ### 3. Diff and classify
 
@@ -59,12 +78,14 @@ Flag these in the report with mount instructions.
 
 ### 5. Output report
 
+Start with a summary line: "Audited against Claude Code v{version} (changelog) and env-vars page as of {date}."
+
 ```markdown
 ## Recommended additions
 
-| Variable | Purpose | Category | Priority |
-|---|---|---|---|
-| ... | ... | ... | High/Medium/Low |
+| Variable | Purpose | Category | Priority | Source |
+|---|---|---|---|---|
+| ... | ... | ... | High/Medium/Low | env-vars/changelog v{X} |
 
 ## Possibly deprecated (in blaude, not in docs)
 
@@ -83,11 +104,17 @@ Flag these in the report with mount instructions.
 | Variable | Still in docs? |
 |---|---|
 | ... | Yes/No |
+
+## Sandbox-relevant changelog items (non-env-var)
+
+| Version | Change | Impact on blaude |
+|---|---|---|
+| ... | ... | Action needed / informational |
 ```
 
 **Priority**: High = security/auth/proxy/connectivity. Medium = model config, execution. Low = UI/cosmetic.
 
-If blaude is fully up-to-date (no missing vars), say so clearly at the top of the report. Still include the "Possibly deprecated" and "Already hardcoded" sections for completeness.
+If blaude is fully up-to-date (no missing vars), say so clearly at the top of the report. Still include the other sections for completeness. The "Sandbox-relevant changelog items" section captures non-env-var changes from the changelog that may require blaude updates (new managed settings, new tools, filesystem changes, etc.).
 
 ### 6. Apply changes (if user approves)
 
