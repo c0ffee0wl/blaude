@@ -81,6 +81,7 @@ ssh_mode=false
 aws_mode=false
 keyring_mode=false
 keep_env_mode=false
+allow_protected_writes=false
 debug=false
 dry_run=false
 exec_mode=false
@@ -133,6 +134,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --keep-env)
             keep_env_mode=true
+            shift
+            ;;
+        --allow-protected-writes)
+            allow_protected_writes=true
             shift
             ;;
         --tmp)
@@ -235,6 +240,11 @@ bwrap_args+=(--ro-bind /bin /bin)
 # to e.g. /run/systemd/resolve/stub-resolv.conf, we need to create that target path
 # See: https://github.com/containers/bubblewrap/issues/390
 # Note: The actual symlink target mount is added AFTER base args (--tmpfs /run) below
+_blaude_cleanup() {
+    [[ -n "$resolv_tmp" ]] && rm -f "$resolv_tmp"
+}
+trap '_blaude_cleanup' EXIT
+
 resolv_symlink_target=""
 resolv_symlink_dir=""
 resolv_tmp=""
@@ -247,12 +257,10 @@ if [[ -L /etc/resolv.conf ]]; then
         echo "$resolv_content" > "$resolv_tmp"
         resolv_symlink_target="$resolv_target"
         resolv_symlink_dir=$(dirname "$resolv_target")
-        trap "rm -f '$resolv_tmp'" EXIT
     elif [[ -n "$resolv_content" ]]; then
         # Relative symlink - try direct bind mount over the symlink
         resolv_tmp=$(mktemp)
         echo "$resolv_content" > "$resolv_tmp"
-        trap "rm -f '$resolv_tmp'" EXIT
     fi
 fi
 bwrap_args+=(--ro-bind /etc /etc)
@@ -616,6 +624,23 @@ for mount_spec in "${mount_args[@]}"; do
         exit 1
     fi
 
+    # Resolve symlinks and validate target
+    resolved_path=$(readlink -f "$host_path")
+    if [[ -z "$resolved_path" || ! -e "$resolved_path" ]]; then
+        echo "Error: Mount path is a broken symlink: $host_path" >&2
+        exit 1
+    fi
+    if [[ "$resolved_path" == "$HOME" && "$allow_protected_writes" != true ]]; then
+        echo "Error: Refusing to mount home directory: $host_path" >&2
+        echo "  Use --allow-protected-writes to override." >&2
+        exit 1
+    fi
+    if [[ "$resolved_path" != "$host_path" ]]; then
+        echo "Warning: Mount path $host_path is a symlink to $resolved_path" >&2
+        echo "  Mounting resolved target instead." >&2
+        host_path="$resolved_path"
+    fi
+
     bwrap_args+=(--$mount_mode "$host_path" "$host_path")
 done
 
@@ -623,8 +648,67 @@ done
 if [[ "$tmp_mode" == true ]]; then
     bwrap_args+=(--chdir /tmp)
 else
-    bwrap_args+=(--bind "$current_dir" "/workspaces/$safe_dir_name")
-    bwrap_args+=(--chdir "/workspaces/$safe_dir_name")
+    # Reject $HOME as workspace (would expose entire home directory read-write)
+    resolved_workspace=$(readlink -f "$current_dir")
+    if [[ "$resolved_workspace" == "$HOME" && "$allow_protected_writes" != true ]]; then
+        echo "Error: Refusing to sandbox home directory as workspace." >&2
+        echo "  Use a subdirectory instead, --tmp, or --allow-protected-writes to override." >&2
+        exit 1
+    fi
+
+    workspace="/workspaces/$safe_dir_name"
+    bwrap_args+=(--bind "$current_dir" "$workspace")
+    bwrap_args+=(--chdir "$workspace")
+
+    # --- Mandatory protected paths ---
+    # Inspired by Anthropic's sandbox-runtime: deny writes to files/directories that
+    # could execute code outside the sandbox.
+    #
+    # Files: --ro-bind (preserves content, hard-blocks writes).
+    # Directories: --tmp-overlay when available (content readable, writes ephemeral,
+    # zero host artifacts), falling back to --ro-bind (hard-blocks writes but bwrap
+    # creates host stubs for non-existent targets). When a protected child directory
+    # doesn't exist, its parent is overlaid instead to prevent creation.
+    # Root-level dotfiles (.bashrc etc.) have no overlayable parent — only protected
+    # if they already exist (low risk: uncommon in project directories).
+    if [[ "$allow_protected_writes" != true ]]; then
+        # Detect bwrap overlay support (added in bwrap 0.8.0)
+        if bwrap --help 2>&1 | grep -q '\-\-tmp-overlay'; then
+            _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
+        else
+            _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
+        fi
+
+        for f in .bashrc .bash_profile .zshrc .zprofile .profile \
+                 .gitconfig .gitmodules .ripgreprc .mcp.json; do
+            [[ -f "$current_dir/$f" ]] && bwrap_args+=(--ro-bind "$current_dir/$f" "$workspace/$f")
+        done
+
+        # .git/* paths: only protect if .git is a directory (not a file, as in git worktrees)
+        if [[ -d "$current_dir/.git" ]]; then
+            if [[ -d "$current_dir/.git/hooks" ]]; then
+                [[ -f "$current_dir/.git/config" ]] && bwrap_args+=(--ro-bind "$current_dir/.git/config" "$workspace/.git/config")
+                _protect_dir "$current_dir/.git/hooks" "$workspace/.git/hooks"
+            else
+                # hooks/ missing — overlay .git/ to prevent hooks/ creation (also covers config)
+                _protect_dir "$current_dir/.git" "$workspace/.git"
+            fi
+        fi
+
+        # .claude/commands and .claude/agents: if both exist, protect individually;
+        # otherwise overlay .claude/ to prevent creation of the missing one
+        if [[ -d "$current_dir/.claude" ]]; then
+            if [[ -d "$current_dir/.claude/commands" && -d "$current_dir/.claude/agents" ]]; then
+                _protect_dir "$current_dir/.claude/commands" "$workspace/.claude/commands"
+                _protect_dir "$current_dir/.claude/agents" "$workspace/.claude/agents"
+            else
+                _protect_dir "$current_dir/.claude" "$workspace/.claude"
+            fi
+        fi
+
+        [[ -d "$current_dir/.vscode" ]] && _protect_dir "$current_dir/.vscode" "$workspace/.vscode"
+        [[ -d "$current_dir/.idea" ]]   && _protect_dir "$current_dir/.idea" "$workspace/.idea"
+    fi
 fi
 
 # Environment handling
@@ -932,8 +1016,12 @@ if [[ "$wsl_mode" == true ]]; then
     fi
 
     sync
-    trap 'sync' EXIT
-    exec bwrap "${bwrap_args[@]}"
+    # WSL2 needs post-bwrap sync, so can't exec; trap handles cleanup + sync
+    trap '_blaude_cleanup; sync' EXIT
+    bwrap "${bwrap_args[@]}"
+    exit $?
 fi
 
+# Clean up temp files before exec (exec replaces the process, so traps won't fire)
+_blaude_cleanup
 exec bwrap "${bwrap_args[@]}"

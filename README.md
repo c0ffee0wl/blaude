@@ -4,9 +4,10 @@ Run [Claude Code](https://claude.ai/code) in a [bubblewrap](https://github.com/c
 
 ## Why?
 
-Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands. blaude wraps it in a Linux sandbox that:
+Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands. blaude automatically runs Claude with this flag inside a Linux sandbox, so you get full autonomous operation without the risk. The sandbox provides:
 
 - Isolates filesystem access (project directory, config, and caches writable; system directories read-only)
+- Protects dangerous files from writes (git hooks, shell configs, IDE configs, Claude commands)
 - Drops all Linux capabilities
 - Uses separate namespaces (PID, IPC, UTS, user)
 - Sanitizes environment variables
@@ -107,6 +108,7 @@ blaude --exec bash
 | `--chic` | Run [claudechic](https://github.com/mrocklin/claudechic) TUI instead of claude |
 | `--tmp` | Run isolated in /tmp |
 | `--clear-tmp` | Use empty tmpfs for /tmp instead of mounting host's /tmp |
+| `--allow-protected-writes` | Allow writes to [protected files](#protected-workspace-paths) |
 | `--debug` | Show bwrap command before executing |
 | `--dry-run` | Show command without executing |
 | `--exec CMD` | Run CMD instead of claude |
@@ -212,6 +214,45 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 | **Webshare** | Any variable starting with `WEBSHARE_` (e.g., `WEBSHARE_API_KEY`, `WEBSHARE_PROXY`) |
 
 Use `--env KEY=VALUE` to pass additional variables not in this list.
+
+## Protected Workspace Paths
+
+Inspired by Anthropic's [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime), blaude write-protects files and directories inside the workspace that could be used to execute code *outside* the sandbox. A sandboxed agent running with `--dangerously-skip-permissions` has full write access to the workspace — without this protection, it could plant a malicious `.git/hooks/pre-commit` or `.bashrc` that runs the next time you open a shell or make a commit on the host.
+
+sandbox-runtime enforces this using ripgrep-based scanning with `/dev/null` overlays and symlink neutralization. blaude uses a similar technique adapted for its bash/bwrap architecture, with zero host filesystem artifacts:
+
+- **Existing files**: `--ro-bind` from host (preserves content, blocks writes)
+- **Existing directories**: `--tmp-overlay` (content readable, writes succeed but are ephemeral — never reach host)
+- **Non-existent directories**: parent directory is overlaid instead (e.g., if `.git/hooks/` is missing, `.git/` is overlaid to prevent hooks creation)
+- **Root-level dotfiles** (`.bashrc` etc.): only protected if they exist (no parent to overlay; low risk since uncommon in project directories)
+- **Git worktrees**: `.git/*` paths are only protected when `.git` is a directory (not a file, as in worktrees)
+
+### Protected files
+
+| Path | Risk |
+|------|------|
+| `.bashrc`, `.bash_profile`, `.profile` | Execute on shell open |
+| `.zshrc`, `.zprofile` | Execute on zsh open |
+| `.gitconfig`, `.gitmodules` | Git config manipulation, submodule URL hijacking |
+| `.git/config` | Can set `core.hooksPath`, `core.fsmonitor` for code execution |
+| `.ripgreprc` | Alters search tool behavior |
+| `.mcp.json` | MCP server configuration |
+
+### Protected directories
+
+| Path | Risk |
+|------|------|
+| `.git/hooks/` | Arbitrary code execution on git operations |
+| `.claude/commands/` | Claude Code custom slash commands |
+| `.claude/agents/` | Claude Code custom agent definitions |
+| `.vscode/` | VS Code tasks and launch configs can execute commands |
+| `.idea/` | JetBrains run configurations can execute commands |
+
+Use `--allow-protected-writes` if you need full workspace access (e.g., developing git hooks). This also bypasses the `$HOME` workspace/mount rejection:
+
+```bash
+blaude --allow-protected-writes
+```
 
 ## Troubleshooting
 
