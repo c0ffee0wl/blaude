@@ -409,39 +409,31 @@ if [[ -d "$HOME/.cache/uv" ]]; then
     bwrap_args+=(--bind "$HOME/.cache/uv" "$HOME/.cache/uv")
 fi
 
-# Bind NVM (Node Version Manager) for npx-based MCP servers
-# NVM installs Node.js to ~/.nvm/versions/node/<version>/
-if [[ -d "$HOME/.nvm" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.nvm" "$HOME/.nvm")
-    nvm_installed=true
-
-    # Auto-detect npm-linked packages and mount their source directories
-    # npm link creates symlinks in node_modules that point outside ~/.nvm
-    declare -A npm_link_targets  # Use associative array to dedupe
+# Resolve symlinks under a package manager directory, find their package roots,
+# and mount them read-only. Also mounts MCP token files read-write for persistence.
+# Usage: _mount_linked_packages <label> <exclude_prefix> <find_args...>
+_mount_linked_packages() {
+    local label="$1" exclude_prefix="$2"
+    shift 2
+    local -A link_targets
     while IFS= read -r -d '' symlink; do
+        local target
         target=$(readlink -f "$symlink" 2>/dev/null)
-        # Only mount if target exists and is outside ~/.nvm
-        if [[ -n "$target" && -e "$target" && "$target" != "$HOME/.nvm"* ]]; then
-            # Get the top-level directory of the linked package
-            # e.g., /home/user/my-project/dist/index.js -> /home/user/my-project
-            link_dir="$target"
-            while [[ "$link_dir" != "/" && "$link_dir" != "$HOME" && ! -f "$link_dir/package.json" ]]; do
-                link_dir=$(dirname "$link_dir")
-            done
-            # Safety: never mount $HOME itself, only subdirectories
-            [[ -f "$link_dir/package.json" && "$link_dir" != "$HOME" ]] && npm_link_targets["$link_dir"]=1
-        fi
-    done < <(find "$HOME/.nvm/versions" -type l -path "*/node_modules/*" -print0 2>/dev/null)
+        [[ -z "$target" || "$target" == "$exclude_prefix"* ]] && continue
+        # Walk up to package root (directory with package.json)
+        local link_dir="$target"
+        while [[ "$link_dir" != "/" && "$link_dir" != "$HOME" && ! -f "$link_dir/package.json" ]]; do
+            link_dir=$(dirname "$link_dir")
+        done
+        [[ -f "$link_dir/package.json" && "$link_dir" != "$HOME" ]] && link_targets["$link_dir"]=1
+    done < <(find "$@" -print0 2>/dev/null)
 
-    for link_target in "${!npm_link_targets[@]}"; do
-        [[ $debug -eq 1 ]] && echo "Auto-mounting npm-linked package: $link_target" >&2
+    for link_target in "${!link_targets[@]}"; do
+        [[ $debug -eq 1 ]] && echo "Auto-mounting ${label}-linked package: $link_target" >&2
         bwrap_args+=(--ro-bind "$link_target" "$link_target")
-
-        # MCP server token files (e.g., ms-365-mcp stores tokens at package root)
-        # Mount these read-write over the read-only package mount for persistence
+        # MCP token files — create if needed for bind mount, mount read-write for persistence
         for token_file in ".token-cache.json" ".selected-account.json"; do
-            token_path="$link_target/$token_file"
-            # Create the file if it doesn't exist (needed for bind mount)
+            local token_path="$link_target/$token_file"
             [[ ! -f "$token_path" ]] && touch "$token_path" 2>/dev/null
             if [[ -f "$token_path" ]]; then
                 [[ $debug -eq 1 ]] && echo "  Mounting token file read-write: $token_path" >&2
@@ -449,6 +441,15 @@ if [[ -d "$HOME/.nvm" ]]; then
             fi
         done
     done
+}
+
+# Bind NVM (Node Version Manager) for npx-based MCP servers
+# NVM installs Node.js to ~/.nvm/versions/node/<version>/
+if [[ -d "$HOME/.nvm" ]]; then
+    bwrap_args+=(--ro-bind "$HOME/.nvm" "$HOME/.nvm")
+    nvm_installed=true
+    _mount_linked_packages "npm" "$HOME/.nvm" \
+        "$HOME/.nvm/versions" -type l -path "*/node_modules/*"
 else
     nvm_installed=false
 fi
@@ -522,6 +523,11 @@ fi
 # Bun runtime and package manager
 if [[ -d "$HOME/.bun" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.bun" "$HOME/.bun")
+    # Scan bin/ and global node_modules/ separately to avoid traversing ~/.bun/install/cache
+    _mount_linked_packages "bun" "$HOME/.bun" \
+        "$HOME/.bun/bin" -type l
+    _mount_linked_packages "bun" "$HOME/.bun" \
+        "$HOME/.bun/install/global/node_modules" -type l
 fi
 
 # Network isolation
