@@ -701,16 +701,7 @@ else
             fi
         fi
 
-        # .claude/commands and .claude/agents: if both exist, protect individually;
-        # otherwise overlay .claude/ to prevent creation of the missing one
-        if [[ -d "$current_dir/.claude" ]]; then
-            if [[ -d "$current_dir/.claude/commands" && -d "$current_dir/.claude/agents" ]]; then
-                _protect_dir "$current_dir/.claude/commands" "$workspace/.claude/commands"
-                _protect_dir "$current_dir/.claude/agents" "$workspace/.claude/agents"
-            else
-                _protect_dir "$current_dir/.claude" "$workspace/.claude"
-            fi
-        fi
+        # .claude/ left writable — skills and agents need to be modifiable
 
         [[ -d "$current_dir/.vscode" ]] && _protect_dir "$current_dir/.vscode" "$workspace/.vscode"
         [[ -d "$current_dir/.idea" ]]   && _protect_dir "$current_dir/.idea" "$workspace/.idea"
