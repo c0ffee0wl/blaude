@@ -243,8 +243,6 @@ sandbox-runtime enforces this using ripgrep-based scanning with `/dev/null` over
 | Path | Risk |
 |------|------|
 | `.git/hooks/` | Arbitrary code execution on git operations |
-| `.claude/commands/` | Claude Code custom slash commands |
-| `.claude/agents/` | Claude Code custom agent definitions |
 | `.vscode/` | VS Code tasks and launch configs can execute commands |
 | `.idea/` | JetBrains run configurations can execute commands |
 
