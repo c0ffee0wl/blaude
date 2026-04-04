@@ -516,6 +516,14 @@ if [[ -d "$HOME/arxiv-storage" ]]; then
 fi
 
 # Claude memory directory (for persistent memory across sessions)
+# Auto-create if claude-mem plugin is installed but data dir doesn't exist yet
+if [[ ! -d "$HOME/.claude-mem" ]]; then
+    if [[ -d "$config_dir/plugins/marketplaces/thedotmack" ]] || \
+       [[ -d "$config_dir/plugins/cache/claude-mem" ]] || \
+       grep -q '"claude-mem"' "$config_dir/plugins/installed_plugins.json" 2>/dev/null; then
+        mkdir -p "$HOME/.claude-mem"
+    fi
+fi
 if [[ -d "$HOME/.claude-mem" ]]; then
     bwrap_args+=(--bind "$HOME/.claude-mem" "$HOME/.claude-mem")
 fi
@@ -523,6 +531,10 @@ fi
 # Bun runtime and package manager
 if [[ -d "$HOME/.bun" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.bun" "$HOME/.bun")
+    # Bun runtime needs writable install cache (plugins like claude-mem run bun install)
+    if [[ -d "$HOME/.bun/install/cache" ]]; then
+        bwrap_args+=(--tmpfs "$HOME/.bun/install/cache")
+    fi
     # Scan bin/ and global node_modules/ separately to avoid traversing ~/.bun/install/cache
     _mount_linked_packages "bun" "$HOME/.bun" \
         "$HOME/.bun/bin" -type l
@@ -855,7 +867,7 @@ claude_env_vars=(
     CLAUDECODE CLAUDE_CODE_DEBUG_LOGS_DIR CLAUDE_CODE_DEBUG_LOG_LEVEL
     # File & Directory Configuration
     CLAUDE_CONFIG_DIR CLAUDE_CODE_TMPDIR USE_BUILTIN_RIPGREP CLAUDE_ENV_FILE
-    CLAUDE_CODE_PLUGIN_SEED_DIR CLAUDE_CODE_PLUGIN_CACHE_DIR
+    CLAUDE_CODE_PLUGIN_SEED_DIR CLAUDE_CODE_PLUGIN_CACHE_DIR CLAUDE_PLUGIN_ROOT
     # Credential & mTLS Authentication
     CLAUDE_CODE_API_KEY_HELPER_TTL_MS CLAUDE_CODE_CLIENT_CERT CLAUDE_CODE_CLIENT_KEY
     CLAUDE_CODE_CLIENT_KEY_PASSPHRASE
@@ -918,9 +930,9 @@ if [[ "$keep_env_mode" != true ]]; then
         fi
     done
 
-    # Auto-passthrough any *_WEBHOOK and WEBSHARE_* environment variables
+    # Auto-passthrough any *_WEBHOOK, WEBSHARE_*, and CLAUDE_MEM_* environment variables
     while IFS='=' read -r name value; do
-        [[ "$name" == *_WEBHOOK || "$name" == WEBSHARE_* ]] && bwrap_args+=(--setenv "$name" "$value")
+        [[ "$name" == *_WEBHOOK || "$name" == WEBSHARE_* || "$name" == CLAUDE_MEM_* ]] && bwrap_args+=(--setenv "$name" "$value")
     done < <(env)
 
     # D-Bus session bus address (only with --keyring flag)

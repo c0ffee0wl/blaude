@@ -4,7 +4,9 @@ Run [Claude Code](https://claude.ai/code) in a [bubblewrap](https://github.com/c
 
 ## Why?
 
-Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands. blaude automatically runs Claude with this flag inside a Linux sandbox, so you get full autonomous operation without the risk. The sandbox provides:
+Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands. blaude automatically runs Claude with this flag inside a Linux sandbox, so you get full autonomous operation without (most of) the risk. 
+
+The sandbox provides:
 
 - Isolates filesystem access (project directory, config, and caches writable; system directories read-only)
 - Protects dangerous files from writes (git hooks, shell configs, IDE configs, Claude commands)
@@ -211,6 +213,7 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 | **Third-party Services** | `FEEDLY_ACCESS_TOKEN`, `RAINDROP_ACCESS_TOKEN` |
 | **claudechic** | `CLAUDECHIC_DEBUG`, `CLAUDECHIC_REMOTE_PORT`, `CHIC_PROFILE`, `CHIC_SAMPLE_THRESHOLD` |
 | **notebooklm-mcp** | `NOTEBOOKLM_COOKIES`, `NOTEBOOKLM_CSRF_TOKEN`, `NOTEBOOKLM_SESSION_ID`, `NOTEBOOKLM_MCP_*` |
+| **claude-mem** | Any variable starting with `CLAUDE_MEM_` (e.g., `CLAUDE_MEM_DATA_DIR`, `CLAUDE_MEM_WORKER_PORT`) |
 | **Webhooks** | Any variable ending in `_WEBHOOK` (e.g., `SLACK_WEBHOOK`, `DISCORD_WEBHOOK`) |
 | **Webshare** | Any variable starting with `WEBSHARE_` (e.g., `WEBSHARE_API_KEY`, `WEBSHARE_PROXY`) |
 

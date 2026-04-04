@@ -59,7 +59,7 @@ The `claude_env_vars` array contains all official Claude Code env vars from http
 
 - **Hardcoded vars** (set unconditionally via `--setenv`): `DO_NOT_TRACK`, `DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER`, `DISABLE_ERROR_REPORTING`, `DISABLE_BUG_COMMAND`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`, `DISABLE_INSTALL_GITHUB_APP_COMMAND`, `CLAUDE_DISABLE_CONFIG_WATCH` — never add these to passthrough.
 - **GitHub tokens** (`GH_TOKEN`, `GITHUB_TOKEN`): Only passed with `--git` flag.
-- **Glob patterns**: `*_WEBHOOK` and `WEBSHARE_*` are auto-passed via env scanning loop (not in the array).
+- **Glob patterns**: `*_WEBHOOK`, `WEBSHARE_*`, and `CLAUDE_MEM_*` are auto-passed via env scanning loop (not in the array).
 - **Auto-mounted file/path vars**: Vars pointing to files/dirs need both passthrough AND a bind-mount. Currently: `CLAUDE_ENV_FILE`, `CLAUDE_CODE_PLUGIN_SEED_DIR`, `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_CODE_DEBUG_LOGS_DIR`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `NODE_EXTRA_CA_CERTS`. When adding new vars, check if they reference paths.
 
 ## AppArmor (Ubuntu 24.04+)
@@ -75,14 +75,14 @@ Auto-detected via `/proc/sys/kernel/osrelease` or `/proc/version`. Session-cache
 
 ## Optional Directory Mounts
 
-These directories are mounted only if they exist on the host (not created automatically):
+These directories are mounted only if they exist on the host (not created automatically, unless noted):
 
 | Directory | Access | Purpose |
 |-----------|--------|---------|
 | `~/.config/` | read-write | User config (uv, fabric, google-chrome, etc.) |
-| `~/.bun/` | read-only | Bun runtime (`~/.bun/bin` added to PATH) |
+| `~/.bun/` | read-only | Bun runtime (`~/.bun/bin` added to PATH); `~/.bun/install/cache` gets a writable tmpfs overlay |
 | `~/arxiv-storage/` | read-write | Research paper management |
-| `~/.claude-mem/` | read-write | Persistent memory across sessions |
+| `~/.claude-mem/` | read-write | Persistent memory across sessions (auto-created if claude-mem plugin detected) |
 | `~/.notebooklm-mcp/` | read-write | notebooklm-mcp auth (created if missing) |
 
 ## Prerequisites
