@@ -60,7 +60,7 @@ The `claude_env_vars` array contains all official Claude Code env vars from http
 - **Hardcoded vars** (set unconditionally via `--setenv`): `DO_NOT_TRACK`, `DISABLE_TELEMETRY`, `DISABLE_AUTOUPDATER`, `DISABLE_ERROR_REPORTING`, `DISABLE_BUG_COMMAND`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY`, `DISABLE_INSTALL_GITHUB_APP_COMMAND`, `CLAUDE_DISABLE_CONFIG_WATCH` — never add these to passthrough.
 - **GitHub tokens** (`GH_TOKEN`, `GITHUB_TOKEN`): Only passed with `--git` flag.
 - **Glob patterns**: `*_WEBHOOK`, `WEBSHARE_*`, and `CLAUDE_MEM_*` are auto-passed via env scanning loop (not in the array).
-- **Auto-mounted file/path vars**: Vars pointing to files/dirs need both passthrough AND a bind-mount. Currently: `CLAUDE_ENV_FILE`, `CLAUDE_CODE_PLUGIN_SEED_DIR`, `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_CODE_DEBUG_LOGS_DIR`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `NODE_EXTRA_CA_CERTS`. When adding new vars, check if they reference paths.
+- **Auto-mounted file/path vars**: Vars pointing to files/dirs need both passthrough AND a bind-mount. Currently: `CLAUDE_ENV_FILE`, `CLAUDE_CODE_PLUGIN_SEED_DIR`, `CLAUDE_CODE_PLUGIN_CACHE_DIR`, `CLAUDE_PLUGIN_DATA`, `CLAUDE_SKILL_DIR`, `CLAUDE_CODE_DEBUG_LOGS_DIR`, `CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `NODE_EXTRA_CA_CERTS`. When adding new vars, check if they reference paths.
 
 ## AppArmor (Ubuntu 24.04+)
 
