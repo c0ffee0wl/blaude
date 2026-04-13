@@ -259,11 +259,9 @@ blaude --allow-protected-writes
 
 ## Clipboard Support
 
-In NO_FLICKER mode (`CLAUDE_CODE_NO_FLICKER=1`), native terminal text selection is disabled — Claude captures mouse events and copies via OSC 52. VTE-based terminals (Terminator, GNOME Terminal, XFCE Terminal) don't support OSC 52, so clipboard silently fails.
+VTE-based terminals (Terminator, GNOME Terminal, XFCE Terminal) don't support OSC 52 clipboard sequences. Claude Code uses OSC 52 for clipboard operations, so copying silently fails on these terminals.
 
-blaude ships `osc52-clipboard`, a companion script that intercepts OSC 52 sequences and copies to the system clipboard via `xclip`, `xsel`, or `wl-copy`. It activates automatically when NO_FLICKER is enabled and `osc52-clipboard` is found (same directory as blaude, or on PATH). Disable with `--no-clipboard`.
-
-In normal mode (without NO_FLICKER), native terminal selection works, so the proxy is not needed.
+blaude ships `osc52-clipboard`, a companion script that intercepts OSC 52 sequences and copies to the system clipboard via `xclip`, `xsel`, or `wl-copy`. It activates automatically when `osc52-clipboard` is found (same directory as blaude, or on PATH). Disable with `--no-clipboard`.
 
 Requires one of: `xclip`, `xsel` (X11), or `wl-copy` (Wayland).
 
