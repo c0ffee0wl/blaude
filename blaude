@@ -18,9 +18,6 @@ if [[ -z "$claude_path" ]]; then
     echo "Install from: https://docs.anthropic.com/en/docs/claude-code" >&2
     exit 1
 fi
-# Resolve symlinks to get the real path
-claude_real_path=$(readlink -f "$claude_path")
-
 # Commands that must run outside the sandbox (need write access to system paths)
 if [[ "${1:-}" =~ ^(update|install|install-github-app)$ ]]; then
     exec claude "$@"
@@ -37,7 +34,7 @@ if [[ "${1:-}" == "fix-apparmor" ]]; then
         exit 0
     fi
     if [[ ! -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] || \
-       [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" != "1" ]]; then
+       [[ "$(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" != "1" ]]; then
         echo "Unprivileged user namespaces are not restricted. No fix needed." >&2
         exit 0
     fi
@@ -68,6 +65,8 @@ fi
 
 current_dir=$(pwd)
 dir_name=$(basename "$current_dir")
+_host_uid=$(id -u)
+_host_gid=$(id -g)
 # Sanitize directory name (colons can cause issues in some contexts)
 safe_dir_name="${dir_name//:/-}"
 
@@ -87,12 +86,13 @@ dry_run=false
 exec_mode=false
 chic_mode=false
 clear_tmp_mode=false
+no_clipboard=false
 
 # Auto-detect WSL (check both osrelease and /proc/version for robustness)
 # Cache result in /tmp to avoid repeated proc checks within a session
-wsl_cache="/tmp/blaude-wsl-${UID:-$(id -u)}"
+wsl_cache="/tmp/blaude-wsl-${UID:-$_host_uid}"
 if [[ -f "$wsl_cache" ]]; then
-    wsl_mode=$(cat "$wsl_cache")
+    wsl_mode=$(< "$wsl_cache")
 else
     wsl_mode=false
     if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || \
@@ -101,6 +101,25 @@ else
     fi
     echo "$wsl_mode" > "$wsl_cache" 2>/dev/null || true
 fi
+
+# Find asciinema's PID by walking ancestor processes via /proc.
+_find_asciinema_pid() {
+    local pid ppid key val _
+    pid=$$
+    while [[ $pid -gt 1 ]]; do
+        ppid=
+        while IFS=$':\t ' read -r key val _; do
+            [[ "$key" == "PPid" ]] && ppid=$val && break
+        done < /proc/$pid/status 2>/dev/null
+        [[ -z "$ppid" || "$ppid" == "0" ]] && return 1
+        if [[ "$(< /proc/$ppid/comm 2>/dev/null)" == "asciinema" ]]; then
+            echo "$ppid"
+            return 0
+        fi
+        pid=$ppid
+    done
+    return 1
+}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -167,6 +186,10 @@ while [[ $# -gt 0 ]]; do
             chic_mode=true
             shift
             ;;
+        --no-clipboard)
+            no_clipboard=true
+            shift
+            ;;
         *)
             # Accumulate ALL unknown args for claude (fixes ordering)
             command_args+=("$1")
@@ -220,12 +243,12 @@ bwrap_args=(
 
 # User namespace: run as non-root inside sandbox (required for --dangerously-skip-permissions)
 # This maps the current user to UID 1000 inside the sandbox
-if [[ $(id -u) -eq 0 ]]; then
+if [[ $_host_uid -eq 0 ]]; then
     # Running as root: create user namespace and become non-root inside
     bwrap_args+=(--unshare-user --uid 1000 --gid 1000)
 else
     # Non-root: still use user namespace for isolation, keep same UID
-    bwrap_args+=(--unshare-user --uid "$(id -u)" --gid "$(id -g)")
+    bwrap_args+=(--unshare-user --uid "$_host_uid" --gid "$_host_gid")
 fi
 
 # System mounts (read-only)
@@ -273,10 +296,10 @@ if [[ -d /usr/share/pyenv/shims ]]; then
 fi
 
 # Determine sandbox UID for paths
-if [[ $(id -u) -eq 0 ]]; then
+if [[ $_host_uid -eq 0 ]]; then
     sandbox_uid=1000
 else
-    sandbox_uid=$(id -u)
+    sandbox_uid=$_host_uid
 fi
 
 # Required filesystems
@@ -306,14 +329,14 @@ if [[ "$keyring_mode" == true ]]; then
             dbus_socket="${DBUS_SESSION_BUS_ADDRESS#*unix:path=}"
             dbus_socket="${dbus_socket%%,*}"
         elif [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:abstract="* ]]; then
-            [[ $debug -eq 1 ]] && echo "Warning: D-Bus uses abstract socket (won't work in sandbox)" >&2
+            [[ "$debug" == true ]] && echo "Warning: D-Bus uses abstract socket (won't work in sandbox)" >&2
         fi
     fi
-    [[ -z "$dbus_socket" ]] && dbus_socket="/run/user/$(id -u)/bus"
+    [[ -z "$dbus_socket" ]] && dbus_socket="/run/user/$_host_uid/bus"
 
     if [[ -S "$dbus_socket" ]]; then
         bwrap_args+=(--bind "$dbus_socket" "$dbus_socket")
-        [[ $debug -eq 1 ]] && echo "Binding D-Bus session socket: $dbus_socket" >&2
+        [[ "$debug" == true ]] && echo "Binding D-Bus session socket: $dbus_socket" >&2
     fi
 fi
 
@@ -359,7 +382,7 @@ bwrap_args+=(
 if [[ "$keyring_mode" == true ]]; then
     keyrings_dir="$HOME/.local/share/keyrings"
     if [[ -d "$keyrings_dir" ]]; then
-        [[ $debug -eq 1 ]] && echo "Binding GNOME Keyring storage: $keyrings_dir" >&2
+        [[ "$debug" == true ]] && echo "Binding GNOME Keyring storage: $keyrings_dir" >&2
         bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
     else
         mkdir -p "$keyrings_dir" 2>/dev/null
@@ -429,14 +452,14 @@ _mount_linked_packages() {
     done < <(find "$@" -print0 2>/dev/null)
 
     for link_target in "${!link_targets[@]}"; do
-        [[ $debug -eq 1 ]] && echo "Auto-mounting ${label}-linked package: $link_target" >&2
+        [[ "$debug" == true ]] && echo "Auto-mounting ${label}-linked package: $link_target" >&2
         bwrap_args+=(--ro-bind "$link_target" "$link_target")
         # MCP token files — create if needed for bind mount, mount read-write for persistence
         for token_file in ".token-cache.json" ".selected-account.json"; do
             local token_path="$link_target/$token_file"
             [[ ! -f "$token_path" ]] && touch "$token_path" 2>/dev/null
             if [[ -f "$token_path" ]]; then
-                [[ $debug -eq 1 ]] && echo "  Mounting token file read-write: $token_path" >&2
+                [[ "$debug" == true ]] && echo "  Mounting token file read-write: $token_path" >&2
                 bwrap_args+=(--bind "$token_path" "$token_path")
             fi
         done
@@ -1023,12 +1046,38 @@ if [[ "$dry_run" == true ]]; then
     exit 0
 fi
 
+# Pause asciinema recording during the sandbox session
+_asciinema_pid=""
+if [[ "${ASCIINEMA_REC:-}" == "1" ]]; then
+    _asciinema_pid=$(_find_asciinema_pid)
+    if [[ -n "$_asciinema_pid" ]]; then
+        [[ "$debug" == true ]] && echo "Pausing asciinema (PID $_asciinema_pid)" >&2
+    fi
+fi
+
+# Auto-detect osc52-clipboard for OSC 52 interception (VTE terminals don't support OSC 52)
+_clipboard_cmd=""
+if [[ "$no_clipboard" != true ]]; then
+    _blaude_dir=$(dirname "$(readlink -f "$0")")
+    if [[ -x "$_blaude_dir/osc52-clipboard" ]]; then
+        _clipboard_cmd="$_blaude_dir/osc52-clipboard"
+    elif command -v osc52-clipboard &>/dev/null; then
+        _clipboard_cmd=$(command -v osc52-clipboard)
+    fi
+fi
+if [[ -n "$_clipboard_cmd" ]]; then
+    [[ "$debug" == true ]] && echo "Clipboard proxy: $_clipboard_cmd" >&2
+    final_cmd=("$_clipboard_cmd" bwrap "${bwrap_args[@]}")
+else
+    final_cmd=(bwrap "${bwrap_args[@]}")
+fi
+
 # Detect AppArmor user namespace restriction (Ubuntu 24.04+)
 # bwrap needs user namespaces, which AppArmor may block by default
 if command -v apparmor_parser &>/dev/null && \
    [[ -d /sys/module/apparmor ]] && \
    [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] && \
-   [[ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == "1" ]] && \
+   [[ "$(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == "1" ]] && \
    [[ ! -f /etc/apparmor.d/bwrap ]]; then
     echo "Warning: AppArmor is restricting unprivileged user namespaces." >&2
     echo "  bwrap may fail with 'Operation not permitted' on this system." >&2
@@ -1045,7 +1094,7 @@ if [[ "$wsl_mode" == true ]]; then
     [[ "$debug" == true ]] && echo "WSL2 detected: applying workarounds" >&2
 
     # Warn if workspace is on Windows filesystem (9P) - once per session
-    wsl_mnt_warned="/tmp/blaude-mnt-warned-${UID:-$(id -u)}"
+    wsl_mnt_warned="/tmp/blaude-mnt-warned-${UID:-$_host_uid}"
     if [[ "$current_dir" == /mnt/* && ! -f "$wsl_mnt_warned" ]]; then
         echo "Warning: Workspace is on Windows filesystem (/mnt/*)." >&2
         echo "  WSL2's 9P protocol has known bugs causing spurious ENOENT errors." >&2
@@ -1058,12 +1107,22 @@ if [[ "$wsl_mode" == true ]]; then
     fi
 
     sync
-    # WSL2 needs post-bwrap sync, so can't exec; trap handles cleanup + sync
-    trap '_blaude_cleanup; sync' EXIT
-    bwrap "${bwrap_args[@]}"
+fi
+
+# Non-exec path: WSL2 needs post-bwrap sync, asciinema needs post-bwrap SIGCONT.
+# Both require blaude to stay alive after bwrap exits, so we can't exec.
+if [[ "$wsl_mode" == true || -n "$_asciinema_pid" ]]; then
+    _blaude_exit() {
+        _blaude_cleanup
+        [[ "$wsl_mode" == true ]] && sync
+        [[ -n "${_asciinema_pid:-}" ]] && kill -CONT "$_asciinema_pid" 2>/dev/null
+    }
+    trap _blaude_exit EXIT
+    [[ -n "$_asciinema_pid" ]] && kill -STOP "$_asciinema_pid" 2>/dev/null
+    "${final_cmd[@]}"
     exit $?
 fi
 
 # Clean up temp files before exec (exec replaces the process, so traps won't fire)
 _blaude_cleanup
-exec bwrap "${bwrap_args[@]}"
+exec "${final_cmd[@]}"

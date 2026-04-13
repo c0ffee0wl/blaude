@@ -114,6 +114,7 @@ blaude --exec bash
 | `--debug` | Show bwrap command before executing |
 | `--dry-run` | Show command without executing |
 | `--exec CMD` | Run CMD instead of claude |
+| `--no-clipboard` | Disable OSC 52 clipboard interception |
 | `fix-apparmor` | Install AppArmor profile for bwrap (Ubuntu 24.04+, requires sudo) |
 
 All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to claude.
@@ -255,6 +256,20 @@ Use `--allow-protected-writes` if you need full workspace access (e.g., developi
 ```bash
 blaude --allow-protected-writes
 ```
+
+## Clipboard Support
+
+VTE-based terminals (Terminator, GNOME Terminal, XFCE Terminal) don't support OSC 52, the escape sequence Claude Code uses for clipboard. blaude ships `osc52-clipboard`, a companion script that intercepts OSC 52 sequences and copies to the system clipboard via `xclip`, `xsel`, or `wl-copy`.
+
+When `osc52-clipboard` is found (same directory as blaude, or on PATH), it is used automatically. No configuration needed. Disable with `--no-clipboard`.
+
+Requires one of: `xclip`, `xsel` (X11), or `wl-copy` (Wayland).
+
+## Asciinema Support
+
+When running inside [asciinema](https://asciinema.org/) (`ASCIINEMA_REC=1`), blaude pauses the recording for the duration of the Claude session. The asciinema process is stopped (SIGSTOP) before the sandbox starts and resumed (SIGCONT) when it exits. The recording continues seamlessly after Claude exits.
+
+blaude finds the asciinema process by walking the `/proc` ancestor chain. If detection fails, the sandbox runs normally without pausing.
 
 ## Troubleshooting
 

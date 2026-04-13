@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""PTY proxy that intercepts OSC 52 clipboard sequences and copies via xsel/xclip/wl-copy.
+
+Sits between a parent process and a child command. All output passes through
+unchanged, but OSC 52 sequences are additionally decoded and sent to the
+system clipboard. Designed for terminals that don't support OSC 52 (e.g. VTE).
+
+Usage: osc52-clipboard <command> [args...]
+"""
+import base64
+import os
+import pty
+import shutil
+import subprocess
+import sys
+
+# --- Clipboard backend detection ---
+
+def _detect_clipboard():
+    """Detect available clipboard command. Returns arg list or None."""
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        return ["wl-copy"]
+    if os.environ.get("DISPLAY"):
+        if shutil.which("xclip"):
+            return ["xclip", "-selection", "clipboard"]
+        if shutil.which("xsel"):
+            return ["xsel", "--clipboard", "--input"]
+    if shutil.which("pbcopy"):
+        return ["pbcopy"]
+    return None
+
+
+def _copy_to_clipboard(payload, clip_cmd):
+    """Decode base64 payload and send to clipboard."""
+    try:
+        text = base64.b64decode(payload).decode("utf-8", errors="replace")
+        subprocess.run(clip_cmd, input=text.encode(), check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
+# --- OSC 52 state machine scanner ---
+
+_PASSTHROUGH = 0
+_SAW_ESC = 1
+_IN_OSC = 2
+_IN_PAYLOAD = 3
+
+
+class _OSC52Scanner:
+    """Scans byte stream for OSC 52 sequences. Observe-only — never modifies data."""
+
+    __slots__ = ("state", "buf", "clip_cmd")
+
+    def __init__(self, clip_cmd):
+        self.state = _PASSTHROUGH
+        self.buf = bytearray()
+        self.clip_cmd = clip_cmd
+
+    def feed(self, data):
+        # Fast path: skip chunks with no ESC byte
+        if self.state == _PASSTHROUGH:
+            idx = data.find(0x1B)
+            if idx == -1:
+                return
+            self._scan(memoryview(data)[idx:])
+        else:
+            self._scan(data)
+
+    def _scan(self, data):
+        for b in data:
+            if self.state == _PASSTHROUGH:
+                if b == 0x1B:
+                    self.state = _SAW_ESC
+            elif self.state == _SAW_ESC:
+                if b == ord("]"):
+                    self.state = _IN_OSC
+                    self.buf.clear()
+                else:
+                    self.state = _PASSTHROUGH
+            elif self.state == _IN_OSC:
+                self.buf.append(b)
+                hdr = bytes(self.buf)
+                if hdr.startswith(b"52;") and b";" in hdr[3:]:
+                    # Matched "52;<target>;" — collect payload
+                    self.buf.clear()
+                    self.state = _IN_PAYLOAD
+                elif b == 0x07 or hdr.endswith(b"\x1b\\"):
+                    # Non-52 OSC terminated
+                    self.state = _PASSTHROUGH
+                    self.buf.clear()
+                elif len(self.buf) > 16:
+                    self.state = _PASSTHROUGH
+                    self.buf.clear()
+            elif self.state == _IN_PAYLOAD:
+                if b == 0x07:
+                    self._finish()
+                elif b == ord("\\") and self.buf and self.buf[-1] == 0x1B:
+                    self.buf.pop()  # Remove the ESC from ST terminator
+                    self._finish()
+                else:
+                    self.buf.append(b)
+                    if len(self.buf) > 1_048_576:  # 1 MB safety cap
+                        self.state = _PASSTHROUGH
+                        self.buf.clear()
+
+    def _finish(self):
+        _copy_to_clipboard(bytes(self.buf), self.clip_cmd)
+        self.state = _PASSTHROUGH
+        self.buf.clear()
+
+
+# --- Main ---
+
+def main():
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <command> [args...]", file=sys.stderr)
+        sys.exit(1)
+
+    if os.environ.get("BLAUDE_NO_CLIPBOARD") == "1":
+        os.execvp(sys.argv[1], sys.argv[1:])
+
+    clip_cmd = _detect_clipboard()
+    if clip_cmd is None:
+        print("osc52-clipboard: no clipboard tool found (need xclip, xsel, or wl-copy)", file=sys.stderr)
+        # Run without clipboard interception
+        os.execvp(sys.argv[1], sys.argv[1:])
+
+    scanner = _OSC52Scanner(clip_cmd)
+
+    def master_read(fd):
+        data = os.read(fd, 16384)
+        scanner.feed(data)
+        return data
+
+    status = pty.spawn(sys.argv[1:], master_read=master_read)
+    sys.exit(os.waitstatus_to_exitcode(status))
+
+
+if __name__ == "__main__":
+    main()
