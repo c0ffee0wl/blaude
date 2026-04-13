@@ -1055,9 +1055,10 @@ if [[ "${ASCIINEMA_REC:-}" == "1" ]]; then
     fi
 fi
 
-# Auto-detect osc52-clipboard for OSC 52 interception (VTE terminals don't support OSC 52)
+# Auto-detect osc52-clipboard for NO_FLICKER mode (native selection disabled, OSC 52 is the
+# only clipboard mechanism, and VTE terminals don't support it)
 _clipboard_cmd=""
-if [[ "$no_clipboard" != true ]]; then
+if [[ "$no_clipboard" != true && "${CLAUDE_CODE_NO_FLICKER:-}" == "1" ]]; then
     _blaude_dir=$(dirname "$(readlink -f "$0")")
     if [[ -x "$_blaude_dir/osc52-clipboard" ]]; then
         _clipboard_cmd="$_blaude_dir/osc52-clipboard"
