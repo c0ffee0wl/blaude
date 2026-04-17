@@ -766,7 +766,7 @@ fi
 if [[ "$keep_env_mode" != true ]]; then
     bwrap_args+=(--clearenv)
     bwrap_args+=(--setenv HOME "$HOME")
-    bwrap_args+=(--setenv USER "$USER")
+    bwrap_args+=(--setenv USER "${USER:-${LOGNAME:-root}}")
     bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
     _setenv_if_set COLORTERM
 fi
