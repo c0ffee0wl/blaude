@@ -482,6 +482,9 @@ _bind_if_exists "$HOME/.cache/uv" d bind
 # the cache file (the readlink -f fork per symlink is the dominant startup cost on
 # a populated nvm/bun tree). Uses bash's `-nt` (stat(2), no fork) — NOT a `stat -c`
 # subshell.
+# Cache-key caveat: directory mtime only bumps when direct children change, so a
+# new symlink nested deep under scan_root (e.g. a grandchild added by `npm i -g`)
+# won't invalidate the cache. Workaround: `rm /tmp/blaude-pkgmount-*-$UID`.
 # Usage: _mount_linked_packages <label> <exclude_prefix> <find_args...>
 _mount_linked_packages() {
     local label="$1" exclude_prefix="$2"
@@ -579,17 +582,13 @@ _bind_if_exists "$HOME/arxiv-storage" d bind
 # Claude memory directory (for persistent memory across sessions)
 # Auto-create if claude-mem plugin is installed but data dir doesn't exist yet
 if [[ ! -d "$HOME/.claude-mem" ]]; then
-    _need_claude_mem=false
     if [[ -d "$config_dir/plugins/marketplaces/thedotmack" || \
           -d "$config_dir/plugins/cache/claude-mem" ]]; then
-        _need_claude_mem=true
-    elif [[ -r "$config_dir/plugins/installed_plugins.json" ]]; then
-        _plugins_json=$(< "$config_dir/plugins/installed_plugins.json")
-        [[ "$_plugins_json" == *\"claude-mem\"* ]] && _need_claude_mem=true
-        unset _plugins_json
+        mkdir -p "$HOME/.claude-mem"
+    elif [[ -r "$config_dir/plugins/installed_plugins.json" ]] && \
+         [[ "$(< "$config_dir/plugins/installed_plugins.json")" == *\"claude-mem\"* ]]; then
+        mkdir -p "$HOME/.claude-mem"
     fi
-    [[ "$_need_claude_mem" == true ]] && mkdir -p "$HOME/.claude-mem"
-    unset _need_claude_mem
 fi
 _bind_if_exists "$HOME/.claude-mem" d bind
 
@@ -614,13 +613,16 @@ fi
 # kind: f (file) or d (directory); mode: ro-bind or bind
 _bind_env_path() { _bind_if_exists "${!1:-}" "$2" "$3"; }
 
+# Add --setenv VAR=<host value> to bwrap_args iff VAR is set and non-empty.
+_setenv_if_set() { [[ -n "${!1:-}" ]] && bwrap_args+=(--setenv "$1" "${!1}"); }
+
 # Git mode: mount git configuration files and pass GitHub tokens
 if [[ "$git_mode" == true ]]; then
     _bind_if_exists "$HOME/.gitconfig" f ro-bind
     _bind_if_exists "$HOME/.git-credentials" f ro-bind
     # GitHub tokens (for gh CLI, git push/pull, MCP servers)
     for var in GH_TOKEN GITHUB_TOKEN; do
-        [[ -n "${!var:-}" ]] && bwrap_args+=(--setenv "$var" "${!var}")
+        _setenv_if_set "$var"
     done
 fi
 
@@ -766,7 +768,7 @@ if [[ "$keep_env_mode" != true ]]; then
     bwrap_args+=(--setenv HOME "$HOME")
     bwrap_args+=(--setenv USER "$USER")
     bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
-    [[ -n "${COLORTERM:-}" ]] && bwrap_args+=(--setenv COLORTERM "$COLORTERM")
+    _setenv_if_set COLORTERM
 fi
 # PATH, GOPATH, CARGO_HOME, NVM_DIR/NPM_CONFIG_PREFIX below are set unconditionally —
 # even under --keep-env — because they must point at sandbox-mounted paths
@@ -811,12 +813,12 @@ else
 fi
 if [[ "$keep_env_mode" != true ]]; then
     bwrap_args+=(--setenv LANG "${LANG:-C.UTF-8}")
-    [[ -n "${LC_ALL:-}" ]] && bwrap_args+=(--setenv LC_ALL "$LC_ALL")
-    [[ -n "${LC_CTYPE:-}" ]] && bwrap_args+=(--setenv LC_CTYPE "$LC_CTYPE")
+    _setenv_if_set LC_ALL
+    _setenv_if_set LC_CTYPE
 
     # SSH agent forwarding env var
     if [[ "$ssh_mode" == true && -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
-        bwrap_args+=(--setenv SSH_AUTH_SOCK "$SSH_AUTH_SOCK")
+        _setenv_if_set SSH_AUTH_SOCK
     fi
 fi
 
@@ -995,15 +997,13 @@ if [[ "$keep_env_mode" != true ]]; then
     while IFS= read -r name; do
         if [[ -n "${_env_whitelist[$name]:-}" || \
               "$name" == *_WEBHOOK || "$name" == WEBSHARE_* || "$name" == CLAUDE_MEM_* ]]; then
-            [[ -n "${!name:-}" ]] && bwrap_args+=(--setenv "$name" "${!name}")
+            _setenv_if_set "$name"
         fi
     done < <(compgen -e)
     unset _env_whitelist
 
     # D-Bus session bus address (only with --keyring flag)
-    if [[ "$keyring_mode" == true && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
-        bwrap_args+=(--setenv DBUS_SESSION_BUS_ADDRESS "$DBUS_SESSION_BUS_ADDRESS")
-    fi
+    [[ "$keyring_mode" == true ]] && _setenv_if_set DBUS_SESSION_BUS_ADDRESS
 fi
 
 for env_spec in "${env_args[@]}"; do
@@ -1125,14 +1125,14 @@ fi
 
 # Non-exec path: WSL2 needs post-bwrap sync, asciinema needs post-bwrap SIGCONT.
 # Both require blaude to stay alive after bwrap exits, so we can't exec.
-if [[ "$wsl_mode" == true || -n "$_asciinema_pid" ]]; then
+if [[ "$wsl_mode" == true || -n "${_asciinema_pid:-}" ]]; then
     _blaude_exit() {
         _blaude_cleanup
         [[ "$wsl_mode" == true ]] && sync
         [[ -n "${_asciinema_pid:-}" ]] && kill -CONT "$_asciinema_pid" 2>/dev/null
     }
     trap _blaude_exit EXIT
-    [[ -n "$_asciinema_pid" ]] && kill -STOP "$_asciinema_pid" 2>/dev/null
+    [[ -n "${_asciinema_pid:-}" ]] && kill -STOP "$_asciinema_pid" 2>/dev/null
     "${final_cmd[@]}"
     exit $?
 fi
