@@ -71,58 +71,86 @@ class _OSC52Scanner:
         self.clip_cmd = clip_cmd
 
     def feed(self, data):
-        # Fast path: skip chunks with no ESC byte
+        # Fast path: PASSTHROUGH chunks with no ESC byte (vast majority of terminal output)
         if self.state == _PASSTHROUGH:
             idx = data.find(0x1B)
             if idx == -1:
                 return
-            self._scan(memoryview(data)[idx:])
-        else:
-            self._scan(data)
+            if idx > 0:
+                data = data[idx:]
+        self._scan(data)
 
     def _scan(self, data):
-        for b in data:
+        i = 0
+        n = len(data)
+        while i < n:
+            # Payload is the hot path: base64 clipboard content can be large.
+            # Use bytes.find() (C-level) to skip to the next terminator byte.
+            if self.state == _IN_PAYLOAD:
+                bel = data.find(0x07, i)
+                esc = data.find(0x1B, i)
+                if bel == -1:
+                    j = n if esc == -1 else esc
+                elif esc == -1:
+                    j = bel
+                else:
+                    j = bel if bel < esc else esc
+                space = 1_048_576 - len(self.buf)  # 1 MB safety cap
+                chunk = j - i
+                if chunk > space:
+                    self.state = _PASSTHROUGH
+                    self.buf.clear()
+                    i = j
+                    continue
+                if chunk:
+                    self.buf.extend(data[i:j])
+                i = j
+                if i >= n:
+                    return
+                b = data[i]
+                i += 1
+                if b == 0x07:
+                    self._finish()
+                else:  # 0x1B
+                    self.state = _PAYLOAD_ESC
+                continue
+
+            b = data[i]
+            i += 1
             if self.state == _PASSTHROUGH:
                 if b == 0x1B:
                     self.state = _SAW_ESC
             elif self.state == _SAW_ESC:
-                if b == ord("]"):
+                if b == 0x5D:  # ']'
                     self.state = _IN_OSC
                     self.buf.clear()
                 else:
                     self.state = _PASSTHROUGH
             elif self.state == _IN_OSC:
                 self.buf.append(b)
-                hdr = bytes(self.buf)
-                if hdr.startswith(b"52;") and b";" in hdr[3:]:
-                    self.buf.clear()
-                    self.state = _IN_PAYLOAD
-                elif b == 0x07 or hdr.endswith(b"\x1b\\"):
-                    self.state = _PASSTHROUGH
-                    self.buf.clear()
-                elif len(self.buf) > 16:
-                    self.state = _PASSTHROUGH
-                    self.buf.clear()
-            elif self.state == _IN_PAYLOAD:
-                if b == 0x07:
-                    self._finish()
-                elif b == 0x1B:
-                    self.state = _PAYLOAD_ESC
-                else:
-                    self.buf.append(b)
-                    if len(self.buf) > 1_048_576:  # 1 MB safety cap
+                bl = len(self.buf)
+                # Match "52;" incrementally (avoids per-byte bytes(self.buf) copy)
+                if bl <= 3:
+                    if self.buf[-1] != b"52;"[bl - 1]:
                         self.state = _PASSTHROUGH
                         self.buf.clear()
+                elif b == 0x3B:  # ';' ends the selector field; payload begins
+                    self.buf.clear()
+                    self.state = _IN_PAYLOAD
+                elif b == 0x07 or (b == 0x5C and self.buf[-2] == 0x1B):
+                    # BEL or ST (ESC \) terminates an aborted OSC header
+                    self.state = _PASSTHROUGH
+                    self.buf.clear()
+                elif bl > 16:
+                    self.state = _PASSTHROUGH
+                    self.buf.clear()
             elif self.state == _PAYLOAD_ESC:
-                if b == ord("\\"):
-                    # ST terminator (ESC + backslash) — complete the sequence
+                if b == 0x5C:  # '\\' — ST terminator (ESC + backslash)
                     self._finish()
-                elif b == ord("]"):
-                    # New OSC starting — abandon current payload, parse new header
+                elif b == 0x5D:  # ']' — new OSC starting
                     self.buf.clear()
                     self.state = _IN_OSC
                 else:
-                    # Broken sequence — not ST or new OSC, reset
                     self.buf.clear()
                     self.state = _PASSTHROUGH
 

@@ -11,9 +11,8 @@ if ! command -v bwrap &>/dev/null; then
     exit 1
 fi
 
-# Check for claude and get its actual path
-claude_path=$(command -v claude)
-if [[ -z "$claude_path" ]]; then
+# Check for claude
+if ! command -v claude &>/dev/null; then
     echo "Error: claude is not installed or not in PATH" >&2
     echo "Install from: https://docs.anthropic.com/en/docs/claude-code" >&2
     exit 1
@@ -64,11 +63,20 @@ APPARMOR
 fi
 
 current_dir=$(pwd)
-dir_name=$(basename "$current_dir")
+dir_name="${current_dir##*/}"
 _host_uid=$(id -u)
 _host_gid=$(id -g)
-# Sanitize directory name (colons can cause issues in some contexts)
+# Sanitize directory name (colons can cause issues in bwrap mount paths)
 safe_dir_name="${dir_name//:/-}"
+
+# Sandbox UID: root is remapped to 1000 (required for --dangerously-skip-permissions)
+if [[ $_host_uid -eq 0 ]]; then
+    sandbox_uid=1000
+    sandbox_gid=1000
+else
+    sandbox_uid=$_host_uid
+    sandbox_gid=$_host_gid
+fi
 
 env_args=()
 mount_args=()
@@ -210,18 +218,20 @@ fi
 config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}'
 
-# Helper function to merge required flags into a config file
+have_jq=false
+command -v jq &>/dev/null && have_jq=true
+
 merge_config_flags() {
     local file="$1"
-    local dir=$(dirname "$file")
-    mkdir -p "$dir"
-    if [[ -f "$file" ]]; then
-        if command -v jq &>/dev/null; then
-            jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "${file}.tmp" && mv "${file}.tmp" "$file"
-        fi
-    else
+    mkdir -p "${file%/*}"
+    if [[ ! -f "$file" ]]; then
         echo "$required_flags" > "$file"
+        return
     fi
+    [[ "$have_jq" == true ]] || return
+    # Skip rewrite when required flags are already set — avoids disk write on every launch
+    jq -e '.hasCompletedOnboarding == true and .bypassPermissionsModeAccepted == true' "$file" >/dev/null 2>&1 && return
+    jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "${file}.tmp" && mv "${file}.tmp" "$file"
 }
 
 # Update both config locations (Claude Code may read from either)
@@ -241,15 +251,7 @@ bwrap_args=(
     --hostname blaude
 )
 
-# User namespace: run as non-root inside sandbox (required for --dangerously-skip-permissions)
-# This maps the current user to UID 1000 inside the sandbox
-if [[ $_host_uid -eq 0 ]]; then
-    # Running as root: create user namespace and become non-root inside
-    bwrap_args+=(--unshare-user --uid 1000 --gid 1000)
-else
-    # Non-root: still use user namespace for isolation, keep same UID
-    bwrap_args+=(--unshare-user --uid "$_host_uid" --gid "$_host_gid")
-fi
+bwrap_args+=(--unshare-user --uid "$sandbox_uid" --gid "$sandbox_gid")
 
 # System mounts (read-only)
 bwrap_args+=(--ro-bind /usr /usr)
@@ -273,17 +275,14 @@ resolv_symlink_dir=""
 resolv_tmp=""
 if [[ -L /etc/resolv.conf ]]; then
     resolv_target=$(readlink /etc/resolv.conf)
-    resolv_content=$(cat /etc/resolv.conf 2>/dev/null)
-    if [[ -n "$resolv_content" && "$resolv_target" == /* ]]; then
-        # Absolute symlink - save info for later (after --tmpfs /run is added)
-        resolv_tmp=$(mktemp)
-        echo "$resolv_content" > "$resolv_tmp"
+    resolv_tmp=$(mktemp)
+    if ! cat /etc/resolv.conf > "$resolv_tmp" 2>/dev/null || [[ ! -s "$resolv_tmp" ]]; then
+        rm -f "$resolv_tmp"
+        resolv_tmp=""
+    elif [[ "$resolv_target" == /* ]]; then
+        # Absolute symlink - create target path after --tmpfs /run is added below
         resolv_symlink_target="$resolv_target"
-        resolv_symlink_dir=$(dirname "$resolv_target")
-    elif [[ -n "$resolv_content" ]]; then
-        # Relative symlink - try direct bind mount over the symlink
-        resolv_tmp=$(mktemp)
-        echo "$resolv_content" > "$resolv_tmp"
+        resolv_symlink_dir="${resolv_target%/*}"
     fi
 fi
 bwrap_args+=(--ro-bind /etc /etc)
@@ -293,13 +292,6 @@ bwrap_args+=(--ro-bind /etc /etc)
 # Writable overlay for pyenv shims (pyenv init tries to write here)
 if [[ -d /usr/share/pyenv/shims ]]; then
     bwrap_args+=(--tmpfs /usr/share/pyenv/shims)
-fi
-
-# Determine sandbox UID for paths
-if [[ $_host_uid -eq 0 ]]; then
-    sandbox_uid=1000
-else
-    sandbox_uid=$_host_uid
 fi
 
 # Required filesystems
@@ -401,10 +393,14 @@ fi
 # Many tools in ~/.local/bin are symlinks to pipx/uv venvs
 bwrap_args+=(--dir /opt)
 
-if [[ -d "$HOME/.local/bin" ]]; then
-    bwrap_args+=(--dir /opt/host-bin)
-    bwrap_args+=(--ro-bind "$HOME/.local/bin" /opt/host-bin)
-fi
+# Mount a host directory under /opt/<name> (read-only), creating the mount point.
+_mount_host_bin() {
+    local host="$1" name="$2"
+    [[ -d "$host" ]] || return
+    bwrap_args+=(--dir "/opt/$name" --ro-bind "$host" "/opt/$name")
+}
+
+_mount_host_bin "$HOME/.local/bin" host-bin
 
 # Bind claude binary to its expected location (Claude Code checks for itself there)
 if [[ -e "$HOME/.local/bin/claude" ]]; then
@@ -477,17 +473,8 @@ else
     nvm_installed=false
 fi
 
-# Bind host's cargo bin if it exists
-if [[ -d "$HOME/.cargo/bin" ]]; then
-    bwrap_args+=(--dir /opt/host-cargo-bin)
-    bwrap_args+=(--ro-bind "$HOME/.cargo/bin" /opt/host-cargo-bin)
-fi
-
-# Bind host's go bin if it exists
-if [[ -d "$HOME/go/bin" ]]; then
-    bwrap_args+=(--dir /opt/host-go-bin)
-    bwrap_args+=(--ro-bind "$HOME/go/bin" /opt/host-go-bin)
-fi
+_mount_host_bin "$HOME/.cargo/bin" host-cargo-bin
+_mount_host_bin "$HOME/go/bin" host-go-bin
 
 # Bind claude's data directory read-only if it exists
 # DISABLE_AUTOUPDATER=1 is set below, so no write access needed
@@ -570,6 +557,20 @@ if [[ "$no_network" == true ]]; then
     bwrap_args+=(--unshare-net)
 fi
 
+# Bind a file/dir named by an env var, if set and existing, at its host path.
+# kind: f (file) or d (directory); mode: ro-bind or bind
+_bind_env_path() {
+    local var="$1" kind="$2" mode="$3"
+    local val="${!var:-}"
+    [[ -z "$val" ]] && return
+    if [[ "$kind" == f ]]; then
+        [[ -f "$val" ]] || return
+    else
+        [[ -d "$val" ]] || return
+    fi
+    bwrap_args+=(--"$mode" "$val" "$val")
+}
+
 # Git mode: mount git configuration files and pass GitHub tokens
 if [[ "$git_mode" == true ]]; then
     if [[ -f "$HOME/.gitconfig" ]]; then
@@ -598,70 +599,31 @@ fi
 
 # AWS mode: mount AWS config/credentials for Bedrock authentication
 if [[ "$aws_mode" == true ]]; then
-    if [[ -d "$HOME/.aws" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.aws" "$HOME/.aws")
-    fi
-    # Mount GOOGLE_APPLICATION_CREDENTIALS file if set and exists
-    if [[ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" && -f "$GOOGLE_APPLICATION_CREDENTIALS" ]]; then
-        bwrap_args+=(--ro-bind "$GOOGLE_APPLICATION_CREDENTIALS" "$GOOGLE_APPLICATION_CREDENTIALS")
-    fi
+    [[ -d "$HOME/.aws" ]] && bwrap_args+=(--ro-bind "$HOME/.aws" "$HOME/.aws")
+    _bind_env_path GOOGLE_APPLICATION_CREDENTIALS f ro-bind
 fi
 
-# CLAUDE_ENV_FILE: mount the env file if set and exists
-if [[ -n "${CLAUDE_ENV_FILE:-}" && -f "$CLAUDE_ENV_FILE" ]]; then
-    bwrap_args+=(--ro-bind "$CLAUDE_ENV_FILE" "$CLAUDE_ENV_FILE")
-fi
+# Files (mTLS, CA bundles, token files, env file) — read-only
+for var in CLAUDE_ENV_FILE CLAUDE_CODE_CLIENT_CERT CLAUDE_CODE_CLIENT_KEY \
+           AWS_WEB_IDENTITY_TOKEN_FILE NODE_EXTRA_CA_CERTS; do
+    _bind_env_path "$var" f ro-bind
+done
 
-# CLAUDE_CODE_PLUGIN_SEED_DIR: mount the plugin seed directory if set and exists
-# Since Claude Code 2.1.79 this may be a list of directories separated by ':'
+# Directories — read-only (skill dir is inert data)
+_bind_env_path CLAUDE_SKILL_DIR d ro-bind
+
+# Directories — read-write (plugin cache, plugin data, debug logs)
+for var in CLAUDE_CODE_PLUGIN_CACHE_DIR CLAUDE_PLUGIN_DATA CLAUDE_CODE_DEBUG_LOGS_DIR; do
+    _bind_env_path "$var" d bind
+done
+
+# CLAUDE_CODE_PLUGIN_SEED_DIR: colon-separated list of directories (Claude Code 2.1.79+)
 if [[ -n "${CLAUDE_CODE_PLUGIN_SEED_DIR:-}" ]]; then
     IFS=':' read -ra _seed_dirs <<< "$CLAUDE_CODE_PLUGIN_SEED_DIR"
     for _seed_dir in "${_seed_dirs[@]}"; do
-        if [[ -n "$_seed_dir" && -d "$_seed_dir" ]]; then
-            bwrap_args+=(--ro-bind "$_seed_dir" "$_seed_dir")
-        fi
+        [[ -n "$_seed_dir" && -d "$_seed_dir" ]] && bwrap_args+=(--ro-bind "$_seed_dir" "$_seed_dir")
     done
     unset _seed_dirs _seed_dir
-fi
-
-# CLAUDE_CODE_PLUGIN_CACHE_DIR: mount the plugin cache directory if set and exists (read-write)
-if [[ -n "${CLAUDE_CODE_PLUGIN_CACHE_DIR:-}" && -d "$CLAUDE_CODE_PLUGIN_CACHE_DIR" ]]; then
-    bwrap_args+=(--bind "$CLAUDE_CODE_PLUGIN_CACHE_DIR" "$CLAUDE_CODE_PLUGIN_CACHE_DIR")
-fi
-
-# CLAUDE_PLUGIN_DATA: mount the plugin persistent data directory if set and exists (read-write)
-if [[ -n "${CLAUDE_PLUGIN_DATA:-}" && -d "$CLAUDE_PLUGIN_DATA" ]]; then
-    bwrap_args+=(--bind "$CLAUDE_PLUGIN_DATA" "$CLAUDE_PLUGIN_DATA")
-fi
-
-# CLAUDE_SKILL_DIR: mount the skill directory if set and exists (read-only)
-if [[ -n "${CLAUDE_SKILL_DIR:-}" && -d "$CLAUDE_SKILL_DIR" ]]; then
-    bwrap_args+=(--ro-bind "$CLAUDE_SKILL_DIR" "$CLAUDE_SKILL_DIR")
-fi
-
-# CLAUDE_CODE_DEBUG_LOGS_DIR: mount the debug logs directory if set and exists (read-write)
-if [[ -n "${CLAUDE_CODE_DEBUG_LOGS_DIR:-}" && -d "$CLAUDE_CODE_DEBUG_LOGS_DIR" ]]; then
-    bwrap_args+=(--bind "$CLAUDE_CODE_DEBUG_LOGS_DIR" "$CLAUDE_CODE_DEBUG_LOGS_DIR")
-fi
-
-# CLAUDE_CODE_CLIENT_CERT: mount the client certificate file for mTLS if set and exists
-if [[ -n "${CLAUDE_CODE_CLIENT_CERT:-}" && -f "$CLAUDE_CODE_CLIENT_CERT" ]]; then
-    bwrap_args+=(--ro-bind "$CLAUDE_CODE_CLIENT_CERT" "$CLAUDE_CODE_CLIENT_CERT")
-fi
-
-# CLAUDE_CODE_CLIENT_KEY: mount the client private key file for mTLS if set and exists
-if [[ -n "${CLAUDE_CODE_CLIENT_KEY:-}" && -f "$CLAUDE_CODE_CLIENT_KEY" ]]; then
-    bwrap_args+=(--ro-bind "$CLAUDE_CODE_CLIENT_KEY" "$CLAUDE_CODE_CLIENT_KEY")
-fi
-
-# AWS_WEB_IDENTITY_TOKEN_FILE: mount the web identity token file if set and exists
-if [[ -n "${AWS_WEB_IDENTITY_TOKEN_FILE:-}" && -f "$AWS_WEB_IDENTITY_TOKEN_FILE" ]]; then
-    bwrap_args+=(--ro-bind "$AWS_WEB_IDENTITY_TOKEN_FILE" "$AWS_WEB_IDENTITY_TOKEN_FILE")
-fi
-
-# NODE_EXTRA_CA_CERTS: mount the custom CA certificate bundle if set and exists
-if [[ -n "${NODE_EXTRA_CA_CERTS:-}" && -f "$NODE_EXTRA_CA_CERTS" ]]; then
-    bwrap_args+=(--ro-bind "$NODE_EXTRA_CA_CERTS" "$NODE_EXTRA_CA_CERTS")
 fi
 
 # Additional mount points
@@ -730,8 +692,17 @@ else
     # Root-level dotfiles (.bashrc etc.) have no overlayable parent — only protected
     # if they already exist (low risk: uncommon in project directories).
     if [[ "$allow_protected_writes" != true ]]; then
-        # Detect bwrap overlay support (added in bwrap 0.8.0)
-        if bwrap --help 2>&1 | grep -q '\-\-tmp-overlay'; then
+        # Detect bwrap overlay support (added in bwrap 0.8.0). Session-cached to avoid
+        # spawning bwrap + grep on every launch.
+        overlay_cache="/tmp/blaude-overlay-${UID:-$_host_uid}"
+        if [[ -f "$overlay_cache" ]]; then
+            bwrap_has_overlay=$(< "$overlay_cache")
+        else
+            bwrap_has_overlay=false
+            bwrap --help 2>&1 | grep -q '\-\-tmp-overlay' && bwrap_has_overlay=true
+            echo "$bwrap_has_overlay" > "$overlay_cache" 2>/dev/null || true
+        fi
+        if [[ "$bwrap_has_overlay" == true ]]; then
             _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
             _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
@@ -846,6 +817,7 @@ claude_env_vars=(
     # Model Configuration
     ANTHROPIC_MODEL ANTHROPIC_SMALL_FAST_MODEL
     ANTHROPIC_CUSTOM_MODEL_OPTION ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION ANTHROPIC_CUSTOM_MODEL_OPTION_NAME
+    ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES
     ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME
     ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES
     ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTS
@@ -907,12 +879,13 @@ claude_env_vars=(
     OTEL_LOG_USER_PROMPTS OTEL_LOG_TOOL_DETAILS OTEL_LOG_TOOL_CONTENT
     OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
     OTEL_METRICS_INCLUDE_SESSION_ID OTEL_METRICS_INCLUDE_VERSION OTEL_METRICS_INCLUDE_ACCOUNT_UUID
-    OTEL_RESOURCE_ATTRIBUTES
+    OTEL_RESOURCE_ATTRIBUTES OTEL_LOG_RAW_API_BODIES
     DISABLE_COST_WARNINGS
     # UI & Display
     CLAUDE_CODE_HIDE_ACCOUNT_INFO CLAUDE_CODE_DISABLE_TERMINAL_TITLE IS_DEMO
     CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_NO_FLICKER CLAUDE_CODE_SCROLL_SPEED FORCE_HYPERLINK
     CLAUDE_CODE_ACCESSIBILITY CLAUDE_CODE_SYNTAX_HIGHLIGHT
+    CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL CLAUDE_CODE_TMUX_TRUECOLOR CLAUDE_CODE_SKIP_PROMPT_HISTORY
     CLAUDE_CODE_AUTO_CONNECT_IDE CLAUDE_CODE_IDE_HOST_OVERRIDE CLAUDE_CODE_IDE_SKIP_VALID_CHECK
     # Development & Debugging
     CLAUDECODE CLAUDE_CODE_DEBUG_LOGS_DIR CLAUDE_CODE_DEBUG_LOG_LEVEL
@@ -945,6 +918,8 @@ claude_env_vars=(
     CLAUDE_CODE_DISABLE_FILE_CHECKPOINTING CLAUDE_CODE_RESUME_INTERRUPTED_TURN
     CLAUDE_AUTO_BACKGROUND_TASKS
     CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS CLAUDE_AGENT_SDK_MCP_NO_PREFIX
+    CLAUDE_CODE_ENABLE_AWAY_SUMMARY CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH
+    CLAUDE_CODE_USE_POWERSHELL_TOOL
     CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX
     # Advanced Features
     CLAUDE_AUTOCOMPACT_PCT_OVERRIDE CLAUDE_CODE_AUTOCOMPACT_PCT_OVERRIDE
@@ -956,9 +931,9 @@ claude_env_vars=(
     CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS
     CLAUDE_CODE_NEW_INIT DISABLE_FEEDBACK_COMMAND
     CLAUDE_CODE_DISABLE_THINKING CLAUDE_CODE_ENABLE_FINE_GRAINED_TOOL_STREAMING
-    CLAUDE_ENABLE_STREAM_WATCHDOG
+    CLAUDE_ENABLE_STREAM_WATCHDOG CLAUDE_ENABLE_BYTE_WATCHDOG
     DISABLE_AUTO_COMPACT DISABLE_COMPACT DISABLE_INTERLEAVED_THINKING
-    ENABLE_PROMPT_CACHING_1H_BEDROCK
+    ENABLE_PROMPT_CACHING_1H ENABLE_PROMPT_CACHING_1H_BEDROCK FORCE_PROMPT_CACHING_5M
     # Additional LLM API keys (for MCP servers and tools that may use them)
     OPENAI_API_KEY OPENAI_API_BASE OPENAI_ORG_ID
     AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION
@@ -985,9 +960,9 @@ if [[ "$keep_env_mode" != true ]]; then
     done
 
     # Auto-passthrough any *_WEBHOOK, WEBSHARE_*, and CLAUDE_MEM_* environment variables
-    while IFS='=' read -r name value; do
-        [[ "$name" == *_WEBHOOK || "$name" == WEBSHARE_* || "$name" == CLAUDE_MEM_* ]] && bwrap_args+=(--setenv "$name" "$value")
-    done < <(env)
+    while IFS= read -r name; do
+        [[ "$name" == *_WEBHOOK || "$name" == WEBSHARE_* || "$name" == CLAUDE_MEM_* ]] && bwrap_args+=(--setenv "$name" "${!name}")
+    done < <(compgen -e)
 
     # D-Bus session bus address (only with --keyring flag)
     if [[ "$keyring_mode" == true && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
