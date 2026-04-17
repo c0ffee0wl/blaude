@@ -109,11 +109,12 @@ no_clipboard=false
 _cached_bool() {
     local key="$1" compute_fn="$2"
     local cache="/tmp/blaude-${key}-${UID:-$_host_uid}"
+    local val
     if [[ -f "$cache" ]]; then
-        printf '%s' "$(<"$cache")"
+        IFS= read -r val < "$cache"
+        printf '%s' "$val"
         return
     fi
-    local val
     val=$("$compute_fn")
     printf '%s\n' "$val" > "$cache" 2>/dev/null || true
     printf '%s' "$val"
@@ -218,7 +219,6 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         *)
-            # Accumulate ALL unknown args for claude (fixes ordering)
             command_args+=("$1")
             shift
             ;;
@@ -233,7 +233,6 @@ fi
 
 # --- Ensure Claude config has required flags ---
 
-# Respect CLAUDE_CONFIG_DIR if set, otherwise use default
 config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}'
 
@@ -247,15 +246,22 @@ merge_config_flags() {
         echo "$required_flags" > "$file"
         return
     fi
+    # Cheap pre-check avoids forking jq on every launch when flags are already set.
+    # grep is faster than jq startup here; false negatives (unusual JSON formatting)
+    # fall through to the jq path below.
+    grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' "$file" && \
+       grep -q '"bypassPermissionsModeAccepted"[[:space:]]*:[[:space:]]*true' "$file" && return
     [[ "$have_jq" == true ]] || return
-    # Skip rewrite when required flags are already set — avoids disk write on every launch
     jq -e '.hasCompletedOnboarding == true and .bypassPermissionsModeAccepted == true' "$file" >/dev/null 2>&1 && return
     jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "${file}.tmp" && mv "${file}.tmp" "$file"
 }
 
-# Update both config locations (Claude Code may read from either)
+# Update both config locations (Claude Code may read from either).
+# Guard the second call in case CLAUDE_CONFIG_DIR=$HOME — then both paths collapse
+# to the same file and the second merge would be redundant.
 merge_config_flags "$config_dir/.claude.json"
-merge_config_flags "$HOME/.claude.json"
+[[ "$config_dir/.claude.json" != "$HOME/.claude.json" ]] && \
+    merge_config_flags "$HOME/.claude.json"
 
 # --- Build bwrap command ---
 
@@ -336,7 +342,6 @@ if [[ -d /usr/share/pyenv/shims ]]; then
     bwrap_args+=(--tmpfs /usr/share/pyenv/shims)
 fi
 
-# Required filesystems
 bwrap_args+=(
     --dev /dev
     --proc /proc
@@ -420,9 +425,10 @@ if [[ "$keyring_mode" == true ]]; then
     _ensure_and_bind "$keyrings_dir" bind
 fi
 
-# npm cache: bind host's cache if exists (for npx-based MCP servers), else ephemeral.
+# npm cache: bind host's cache if it exists (for npx-based MCP servers),
+# otherwise seed an ephemeral _cacache subdir.
 if [[ -d "$HOME/.npm" ]]; then
-    bwrap_args+=(--bind "$HOME/.npm" "$HOME/.npm")
+    _bind_if_exists "$HOME/.npm" d bind
 else
     bwrap_args+=(--dir "$HOME/.npm" --dir "$HOME/.npm/_cacache")
 fi
@@ -460,25 +466,44 @@ _bind_if_exists "$HOME/.cache/uv" d bind
 
 # Resolve symlinks under a package manager directory, find their package roots,
 # and mount them read-only. Also mounts MCP token files read-write for persistence.
+# Results are cached across launches; rebuild when scan_root's mtime is newer than
+# the cache file (the readlink -f fork per symlink is the dominant startup cost on
+# a populated nvm/bun tree). Uses bash's `-nt` (stat(2), no fork) — NOT a `stat -c`
+# subshell.
 # Usage: _mount_linked_packages <label> <exclude_prefix> <find_args...>
 _mount_linked_packages() {
     local label="$1" exclude_prefix="$2"
     shift 2
-    local -A link_targets
-    while IFS= read -r -d '' symlink; do
-        local target
-        target=$(readlink -f "$symlink" 2>/dev/null)
-        [[ -z "$target" || "$target" == "$exclude_prefix"* ]] && continue
-        # Walk up to package root (directory with package.json)
-        local link_dir="$target"
-        while [[ "$link_dir" != "/" && "$link_dir" != "$HOME" && ! -f "$link_dir/package.json" ]]; do
-            link_dir=${link_dir%/*}
-            [[ -z "$link_dir" ]] && link_dir=/
-        done
-        [[ -f "$link_dir/package.json" && "$link_dir" != "$HOME" ]] && link_targets["$link_dir"]=1
-    done < <(find "$@" -print0 2>/dev/null)
+    local scan_root="$1" scan_key
+    scan_key=${scan_root//\//_}
+    local cache_file="/tmp/blaude-pkgmount-${label}-${scan_key}-${UID:-$_host_uid}"
+    local -a link_targets=()
 
-    for link_target in "${!link_targets[@]}"; do
+    if [[ -f "$cache_file" && ! "$scan_root" -nt "$cache_file" ]]; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && link_targets+=("$line")
+        done < "$cache_file"
+    else
+        local -A seen=()
+        while IFS= read -r -d '' symlink; do
+            local target
+            target=$(readlink -f "$symlink" 2>/dev/null)
+            [[ -z "$target" || "$target" == "$exclude_prefix"* ]] && continue
+            # Walk up to package root (directory with package.json)
+            local link_dir="$target"
+            while [[ "$link_dir" != "/" && "$link_dir" != "$HOME" && ! -f "$link_dir/package.json" ]]; do
+                link_dir=${link_dir%/*}
+                [[ -z "$link_dir" ]] && link_dir=/
+            done
+            if [[ -f "$link_dir/package.json" && "$link_dir" != "$HOME" && -z "${seen[$link_dir]:-}" ]]; then
+                seen[$link_dir]=1
+                link_targets+=("$link_dir")
+            fi
+        done < <(find "$@" -print0 2>/dev/null)
+        printf '%s\n' "${link_targets[@]}" > "$cache_file" 2>/dev/null || true
+    fi
+
+    for link_target in "${link_targets[@]}"; do
         _dbg "Auto-mounting ${label}-linked package: $link_target"
         bwrap_args+=(--ro-bind "$link_target" "$link_target")
         # MCP token files — create if needed for bind mount, mount read-write for persistence
@@ -594,12 +619,13 @@ fi
 # AWS mode: mount AWS config/credentials for Bedrock authentication
 if [[ "$aws_mode" == true ]]; then
     _bind_if_exists "$HOME/.aws" d ro-bind
-    _bind_env_path GOOGLE_APPLICATION_CREDENTIALS f ro-bind
 fi
 
-# Files (mTLS, CA bundles, token files, env file) — read-only
+# Files (mTLS, CA bundles, token files, env file, GCP creds) — read-only.
+# GOOGLE_APPLICATION_CREDENTIALS is Vertex-facing and shouldn't require --aws.
 for var in CLAUDE_ENV_FILE CLAUDE_CODE_CLIENT_CERT CLAUDE_CODE_CLIENT_KEY \
-           AWS_WEB_IDENTITY_TOKEN_FILE NODE_EXTRA_CA_CERTS; do
+           AWS_WEB_IDENTITY_TOKEN_FILE NODE_EXTRA_CA_CERTS \
+           GOOGLE_APPLICATION_CREDENTIALS; do
     _bind_env_path "$var" f ro-bind
 done
 
@@ -615,7 +641,7 @@ done
 if [[ -n "${CLAUDE_CODE_PLUGIN_SEED_DIR:-}" ]]; then
     IFS=':' read -ra _seed_dirs <<< "$CLAUDE_CODE_PLUGIN_SEED_DIR"
     for _seed_dir in "${_seed_dirs[@]}"; do
-        [[ -n "$_seed_dir" && -d "$_seed_dir" ]] && bwrap_args+=(--ro-bind "$_seed_dir" "$_seed_dir")
+        _bind_if_exists "$_seed_dir" d ro-bind
     done
     unset _seed_dirs _seed_dir
 fi
@@ -658,7 +684,6 @@ for mount_spec in "${mount_args[@]}"; do
     bwrap_args+=(--$mount_mode "$host_path" "$host_path")
 done
 
-# Workspace mount
 if [[ "$tmp_mode" == true ]]; then
     bwrap_args+=(--chdir /tmp)
 else
@@ -686,30 +711,25 @@ else
     # Root-level dotfiles (.bashrc etc.) have no overlayable parent — only protected
     # if they already exist (low risk: uncommon in project directories).
     if [[ "$allow_protected_writes" != true ]]; then
-        # Overlay support added in bwrap 0.8.0; session-cached.
-        _detect_bwrap_overlay() {
-            if bwrap --help 2>&1 | grep -q '\-\-tmp-overlay'; then
-                echo true
-            else
-                echo false
-            fi
-        }
-        bwrap_has_overlay=$(_cached_bool overlay _detect_bwrap_overlay)
-        if [[ "$bwrap_has_overlay" == true ]]; then
+        # Overlay support added in bwrap 0.8.0. Detect per-launch (not cached) so
+        # bwrap upgrades take effect immediately — stale cache could silently
+        # downgrade overlay→ro-bind and create host stubs.
+        if bwrap --help 2>&1 | grep -q '\-\-tmp-overlay'; then
             _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
             _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
         fi
+        _protect_file() { bwrap_args+=(--ro-bind "$1" "$2"); }
 
         for f in .bashrc .bash_profile .zshrc .zprofile .profile \
                  .gitconfig .gitmodules .ripgreprc .mcp.json; do
-            [[ -f "$current_dir/$f" ]] && bwrap_args+=(--ro-bind "$current_dir/$f" "$workspace/$f")
+            [[ -f "$current_dir/$f" ]] && _protect_file "$current_dir/$f" "$workspace/$f"
         done
 
         # .git/* paths: only protect if .git is a directory (not a file, as in git worktrees)
         if [[ -d "$current_dir/.git" ]]; then
             if [[ -d "$current_dir/.git/hooks" ]]; then
-                [[ -f "$current_dir/.git/config" ]] && bwrap_args+=(--ro-bind "$current_dir/.git/config" "$workspace/.git/config")
+                [[ -f "$current_dir/.git/config" ]] && _protect_file "$current_dir/.git/config" "$workspace/.git/config"
                 _protect_dir "$current_dir/.git/hooks" "$workspace/.git/hooks"
             else
                 # hooks/ missing — overlay .git/ to prevent hooks/ creation (also covers config)
@@ -724,20 +744,13 @@ else
     fi
 fi
 
-# Environment handling
 if [[ "$keep_env_mode" != true ]]; then
-    # Clean environment with selective passthrough (default)
     bwrap_args+=(--clearenv)
     bwrap_args+=(--setenv HOME "$HOME")
-    bwrap_args+=(--setenv USER "${USER:-$(whoami)}")
+    bwrap_args+=(--setenv USER "$USER")
     bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
     [[ -n "${COLORTERM:-}" ]] && bwrap_args+=(--setenv COLORTERM "$COLORTERM")
 fi
-# PATH includes:
-# 1. Ephemeral package directories (writable, for new installs)
-# 2. Host user binaries at /opt/host-* (read-only, for uv, node, etc.)
-# 3. NVM node binaries if available
-# 4. System directories
 sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:/opt/host-bin:/opt/host-cargo-bin:/opt/host-go-bin"
 # Add NVM bin directory if NVM is installed (for npx, node, npm)
 if [[ -n "${NVM_BIN:-}" ]]; then
@@ -787,7 +800,6 @@ if [[ "$keep_env_mode" != true ]]; then
     fi
 fi
 
-# Claude Code configuration
 bwrap_args+=(
     --setenv DO_NOT_TRACK 1
     --setenv DISABLE_TELEMETRY 1
@@ -968,7 +980,6 @@ if [[ "$keep_env_mode" != true ]]; then
     fi
 fi
 
-# User-specified environment variables
 for env_spec in "${env_args[@]}"; do
     key="${env_spec%%=*}"
     value="${env_spec#*=}"
@@ -1036,8 +1047,8 @@ if [[ "$no_clipboard" != true ]]; then
     _blaude_dir=${_blaude_dir%/*}
     if [[ -x "$_blaude_dir/osc52-clipboard" ]]; then
         _clipboard_cmd="$_blaude_dir/osc52-clipboard"
-    elif command -v osc52-clipboard &>/dev/null; then
-        _clipboard_cmd=$(command -v osc52-clipboard)
+    else
+        _clipboard_cmd=$(command -v osc52-clipboard 2>/dev/null || true)
     fi
 fi
 if [[ -n "$_clipboard_cmd" ]]; then
@@ -1049,8 +1060,9 @@ fi
 
 # Detect AppArmor user namespace restriction (Ubuntu 24.04+).
 # bwrap needs user namespaces, which AppArmor may block by default.
-# _apparmor_restricts_userns short-circuits cheaply on non-AppArmor systems.
-if _apparmor_restricts_userns && _apparmor_present && [[ ! -f /etc/apparmor.d/bwrap ]]; then
+# _apparmor_restricts_userns requires /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+# to exist and be "1" — true only on AppArmor-active systems, so short-circuits for free.
+if _apparmor_restricts_userns && [[ ! -f /etc/apparmor.d/bwrap ]]; then
     echo "Warning: AppArmor is restricting unprivileged user namespaces." >&2
     echo "  bwrap may fail with 'Operation not permitted' on this system." >&2
     echo "  Fix with: blaude fix-apparmor" >&2
