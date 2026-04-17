@@ -105,11 +105,14 @@ no_clipboard=false
 
 # Session-cache a boolean result at /tmp/blaude-<key>-$UID to avoid repeated
 # proc/help checks within a session. Compute fn should echo "true" or "false".
+# Optional 3rd arg: invalidate cache when that path is newer (stat via bash -nt,
+# no fork) — used by callers whose answer can change when a binary is upgraded.
 _cached_bool() {
-    local key="$1" compute_fn="$2"
+    local key="$1" compute_fn="$2" invalidate_path="${3:-}"
     local cache="/tmp/blaude-${key}-${UID:-$_host_uid}"
     local val
-    if [[ -f "$cache" ]]; then
+    if [[ -f "$cache" ]] && \
+       { [[ -z "$invalidate_path" ]] || [[ ! "$invalidate_path" -nt "$cache" ]]; }; then
         IFS= read -r val < "$cache"
         printf '%s' "$val"
         return
@@ -119,14 +122,19 @@ _cached_bool() {
     printf '%s' "$val"
 }
 
-_detect_wsl() {
-    if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || \
-       grep -qi microsoft /proc/version 2>/dev/null; then
+# Subshell body (() instead of {}) so `shopt -s nocasematch` doesn't leak to
+# the caller. Matches the `grep -i` semantics of the previous implementation.
+_detect_wsl() (
+    shopt -s nocasematch
+    local osrelease="" version=""
+    [[ -r /proc/sys/kernel/osrelease ]] && IFS= read -r osrelease < /proc/sys/kernel/osrelease
+    [[ -r /proc/version ]] && IFS= read -r version < /proc/version
+    if [[ "$osrelease" == *microsoft* || "$version" == *microsoft* ]]; then
         echo true
     else
         echo false
     fi
-}
+)
 wsl_mode=$(_cached_bool wsl _detect_wsl)
 
 # Find asciinema's PID by walking ancestor processes via /proc.
@@ -235,8 +243,7 @@ fi
 config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}'
 
-have_jq=false
-command -v jq &>/dev/null && have_jq=true
+have_jq=""  # lazy: probed on first merge_config_flags fallthrough
 
 merge_config_flags() {
     local file="$1"
@@ -250,6 +257,7 @@ merge_config_flags() {
     # fall through to the jq path below.
     grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' "$file" && \
        grep -q '"bypassPermissionsModeAccepted"[[:space:]]*:[[:space:]]*true' "$file" && return
+    [[ -z "$have_jq" ]] && { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
     [[ "$have_jq" == true ]] || return
     jq -e '.hasCompletedOnboarding == true and .bypassPermissionsModeAccepted == true' "$file" >/dev/null 2>&1 && return
     jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "${file}.tmp" && mv "${file}.tmp" "$file"
@@ -279,15 +287,21 @@ bwrap_args+=(--unshare-user --uid "$sandbox_uid" --gid "$sandbox_gid")
 
 # --- Mount helpers ---
 # Bind <path> at its own location if it exists.
-# kind: f (file) or d (directory); mode: ro-bind or bind
+# kind: f (file), d (directory), or e (exists — for symlinks etc.)
+# mode: ro-bind, bind, or dev-bind
 _bind_if_exists() {
     local path="$1" kind="$2" mode="$3"
     [[ -z "$path" ]] && return
-    if [[ "$kind" == f ]]; then
-        [[ -f "$path" ]] || return
-    else
-        [[ -d "$path" ]] || return
-    fi
+    case "$kind" in
+        f) [[ -f "$path" ]] || return ;;
+        d) [[ -d "$path" ]] || return ;;
+        e) [[ -e "$path" ]] || return ;;
+        *) echo "_bind_if_exists: invalid kind '$kind'" >&2; exit 1 ;;
+    esac
+    case "$mode" in
+        bind|ro-bind|dev-bind) ;;
+        *) echo "_bind_if_exists: invalid mode '$mode'" >&2; exit 1 ;;
+    esac
     bwrap_args+=(--"$mode" "$path" "$path")
 }
 # Ensure directory exists (creating if needed), then bind-mount at its own location.
@@ -297,6 +311,19 @@ _ensure_and_bind() {
     _bind_if_exists "$path" d "$mode"
 }
 _dbg() { [[ "$debug" == true ]] && echo "$@" >&2; }
+
+# Refuse $HOME as mount target or workspace unless --allow-protected-writes.
+# action: short verb-phrase inserted into the error message ("mount ...",
+# "sandbox home directory as workspace", etc.). extra: optional extra hint line
+# (defaults to "Use --allow-protected-writes to override.").
+_reject_if_home() {
+    local resolved="$1" action="$2" extra="${3:-Use --allow-protected-writes to override.}"
+    [[ "$allow_protected_writes" == true ]] && return
+    [[ "$resolved" != "$HOME" ]] && return
+    echo "Error: Refusing to $action." >&2
+    echo "  $extra" >&2
+    exit 1
+}
 
 # System mounts (read-only)
 bwrap_args+=(--ro-bind /usr /usr)
@@ -394,26 +421,14 @@ if [[ -n "${CLAUDE_CODE_TMPDIR:-}" && "$CLAUDE_CODE_TMPDIR" != "/tmp" ]]; then
     bwrap_args+=(--tmpfs "$CLAUDE_CODE_TMPDIR")
 fi
 
-# Minimal home exposure (only what claude needs)
-# Create home directory structure with writable areas for package managers
+# Minimal home exposure: tmpfs $HOME with scaffolded writable dirs
+# (pkg managers, caches — ephemeral, cleared on sandbox exit).
 bwrap_args+=(--tmpfs "$HOME")
-bwrap_args+=(--dir "$HOME/.local")
-bwrap_args+=(--dir "$HOME/.local/bin")
-bwrap_args+=(--dir "$HOME/.local/share")
-bwrap_args+=(--dir "$HOME/.local/lib")
-
-# Writable directories for package managers (ephemeral - cleared on exit)
-# ~/.cache is writable for build caches
-# ~/go, ~/.cargo for language-specific package managers
-bwrap_args+=(
-    --dir "$HOME/.cache"
-    --dir "$HOME/go"
-    --dir "$HOME/go/bin"
-    --dir "$HOME/go/pkg"
-    --dir "$HOME/.cargo"
-    --dir "$HOME/.cargo/bin"
-    --dir "$HOME/.cargo/registry"
-)
+for _d in .local .local/bin .local/share .local/lib \
+          .cache go go/bin go/pkg .cargo .cargo/bin .cargo/registry; do
+    bwrap_args+=(--dir "$HOME/$_d")
+done
+unset _d
 
 # GNOME Keyring storage (optional, only with --keyring flag)
 if [[ "$keyring_mode" == true ]]; then
@@ -444,9 +459,8 @@ _mount_host_bin() {
 _mount_host_bin "$HOME/.local/bin" host-bin
 
 # Bind claude binary (Claude Code checks for itself there).
-# -e (not -f) so symlinks to claude are also bound.
-[[ -e "$HOME/.local/bin/claude" ]] && \
-    bwrap_args+=(--ro-bind "$HOME/.local/bin/claude" "$HOME/.local/bin/claude")
+# Uses 'e' kind so symlinks to claude are also bound.
+_bind_if_exists "$HOME/.local/bin/claude" e ro-bind
 
 # Bind pipx virtual environments (symlink targets for pipx-installed tools)
 _bind_if_exists "$HOME/.local/share/pipx" d ro-bind
@@ -517,13 +531,12 @@ _mount_linked_packages() {
 
 # Bind NVM (Node Version Manager) for npx-based MCP servers
 # NVM installs Node.js to ~/.nvm/versions/node/<version>/
+nvm_installed=false
 if [[ -d "$HOME/.nvm" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.nvm" "$HOME/.nvm")
     nvm_installed=true
+    _bind_if_exists "$HOME/.nvm" d ro-bind
     _mount_linked_packages "npm" "$HOME/.nvm" \
         "$HOME/.nvm/versions" -type l -path "*/node_modules/*"
-else
-    nvm_installed=false
 fi
 
 _mount_host_bin "$HOME/.cargo/bin" host-cargo-bin
@@ -567,17 +580,23 @@ _bind_if_exists "$HOME/arxiv-storage" d bind
 # Claude memory directory (for persistent memory across sessions)
 # Auto-create if claude-mem plugin is installed but data dir doesn't exist yet
 if [[ ! -d "$HOME/.claude-mem" ]]; then
-    if [[ -d "$config_dir/plugins/marketplaces/thedotmack" ]] || \
-       [[ -d "$config_dir/plugins/cache/claude-mem" ]] || \
-       grep -q '"claude-mem"' "$config_dir/plugins/installed_plugins.json" 2>/dev/null; then
-        mkdir -p "$HOME/.claude-mem"
+    _need_claude_mem=false
+    if [[ -d "$config_dir/plugins/marketplaces/thedotmack" || \
+          -d "$config_dir/plugins/cache/claude-mem" ]]; then
+        _need_claude_mem=true
+    elif [[ -r "$config_dir/plugins/installed_plugins.json" ]]; then
+        _plugins_json=$(< "$config_dir/plugins/installed_plugins.json")
+        [[ "$_plugins_json" == *\"claude-mem\"* ]] && _need_claude_mem=true
+        unset _plugins_json
     fi
+    [[ "$_need_claude_mem" == true ]] && mkdir -p "$HOME/.claude-mem"
+    unset _need_claude_mem
 fi
 _bind_if_exists "$HOME/.claude-mem" d bind
 
 # Bun runtime and package manager
 if [[ -d "$HOME/.bun" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.bun" "$HOME/.bun")
+    _bind_if_exists "$HOME/.bun" d ro-bind
     # Bun runtime needs writable install cache (plugins like claude-mem run bun install)
     [[ -d "$HOME/.bun/install/cache" ]] && bwrap_args+=(--tmpfs "$HOME/.bun/install/cache")
     # Scan bin/ and global node_modules/ separately to avoid traversing ~/.bun/install/cache
@@ -667,11 +686,7 @@ for mount_spec in "${mount_args[@]}"; do
         echo "Error: Mount path is a broken symlink: $host_path" >&2
         exit 1
     fi
-    if [[ "$resolved_path" == "$HOME" && "$allow_protected_writes" != true ]]; then
-        echo "Error: Refusing to mount home directory: $host_path" >&2
-        echo "  Use --allow-protected-writes to override." >&2
-        exit 1
-    fi
+    _reject_if_home "$resolved_path" "mount home directory: $host_path"
     if [[ "$resolved_path" != "$host_path" ]]; then
         echo "Warning: Mount path $host_path is a symlink to $resolved_path" >&2
         echo "  Mounting resolved target instead." >&2
@@ -688,11 +703,8 @@ else
     # Skip the readlink -f fork entirely when the override is set.
     if [[ "$allow_protected_writes" != true ]]; then
         resolved_workspace=$(readlink -f "$current_dir")
-        if [[ "$resolved_workspace" == "$HOME" ]]; then
-            echo "Error: Refusing to sandbox home directory as workspace." >&2
-            echo "  Use a subdirectory instead, --tmp, or --allow-protected-writes to override." >&2
-            exit 1
-        fi
+        _reject_if_home "$resolved_workspace" "sandbox home directory as workspace" \
+            "Use a subdirectory instead, --tmp, or --allow-protected-writes to override."
     fi
 
     workspace="/workspaces/$safe_dir_name"
@@ -711,22 +723,19 @@ else
     # Root-level dotfiles (.bashrc etc.) have no overlayable parent — only protected
     # if they already exist (low risk: uncommon in project directories).
     if [[ "$allow_protected_writes" != true ]]; then
-        # Overlay support added in bwrap 0.8.0. Cache keyed on bwrap binary mtime
-        # (bash -nt, no fork) so upgrades take effect immediately without forking
-        # `bwrap --help | grep` on every launch.
-        _overlay_cache="/tmp/blaude-overlay-${UID:-$_host_uid}"
-        if [[ -f "$_overlay_cache" && ! "$_bwrap_bin" -nt "$_overlay_cache" ]]; then
-            IFS= read -r _has_overlay < "$_overlay_cache"
-        else
-            bwrap --help 2>&1 | grep -q '\-\-tmp-overlay' && _has_overlay=true || _has_overlay=false
-            printf '%s' "$_has_overlay" > "$_overlay_cache" 2>/dev/null || true
-        fi
-        if [[ "$_has_overlay" == true ]]; then
+        # Overlay support added in bwrap 0.8.0. _cached_bool's mtime invalidation
+        # (keyed on the bwrap binary) ensures upgrades take effect immediately
+        # without forking `bwrap --help | grep` on every launch.
+        _detect_overlay() {
+            local help
+            help=$(bwrap --help 2>&1)
+            [[ "$help" == *--tmp-overlay* ]] && echo true || echo false
+        }
+        if [[ "$(_cached_bool overlay _detect_overlay "$_bwrap_bin")" == true ]]; then
             _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
             _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
         fi
-        unset _overlay_cache _has_overlay
         _protect_file() { bwrap_args+=(--ro-bind "$1" "$2"); }
 
         for f in .bashrc .bash_profile .zshrc .zprofile .profile \
@@ -759,6 +768,9 @@ if [[ "$keep_env_mode" != true ]]; then
     bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
     [[ -n "${COLORTERM:-}" ]] && bwrap_args+=(--setenv COLORTERM "$COLORTERM")
 fi
+# PATH, GOPATH, CARGO_HOME, NVM_DIR/NPM_CONFIG_PREFIX below are set unconditionally —
+# even under --keep-env — because they must point at sandbox-mounted paths
+# (e.g. /opt/host-bin) rather than the host's originals.
 sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:/opt/host-bin:/opt/host-cargo-bin:/opt/host-go-bin"
 # Add NVM bin directory if NVM is installed (for npx, node, npm)
 if [[ -n "${NVM_BIN:-}" ]]; then
@@ -808,17 +820,19 @@ if [[ "$keep_env_mode" != true ]]; then
     fi
 fi
 
-bwrap_args+=(
-    --setenv DO_NOT_TRACK 1
-    --setenv DISABLE_TELEMETRY 1
-    --setenv DISABLE_AUTOUPDATER 1
-    --setenv DISABLE_ERROR_REPORTING 1
-    --setenv DISABLE_BUG_COMMAND 1
-    --setenv CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY 1
-    --setenv DISABLE_INSTALL_GITHUB_APP_COMMAND 1
-    # Disable config file watching to prevent inotify ENOSPC crashes in sandbox
-    --setenv CLAUDE_DISABLE_CONFIG_WATCH 1
+# Hardcoded to "1" unconditionally — these must never be accepted from the
+# host environment (the passthrough loop below explicitly removes them from
+# the whitelist, so they can't drift if added to claude_env_vars by accident).
+# CLAUDE_DISABLE_CONFIG_WATCH prevents inotify ENOSPC crashes in sandbox.
+_hardcoded_env_vars=(
+    DO_NOT_TRACK DISABLE_TELEMETRY DISABLE_AUTOUPDATER DISABLE_ERROR_REPORTING
+    DISABLE_BUG_COMMAND CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY
+    DISABLE_INSTALL_GITHUB_APP_COMMAND CLAUDE_DISABLE_CONFIG_WATCH
 )
+for _v in "${_hardcoded_env_vars[@]}"; do
+    bwrap_args+=(--setenv "$_v" 1)
+done
+unset _v
 
 # Auto-passthrough Claude Code environment variables from host
 # Reference: https://code.claude.com/docs/en/settings
@@ -973,6 +987,10 @@ claude_env_vars=(
 if [[ "$keep_env_mode" != true ]]; then
     declare -A _env_whitelist
     for var in "${claude_env_vars[@]}"; do _env_whitelist[$var]=1; done
+    # Remove hardcoded vars from the whitelist — they're set to "1" above and
+    # must never be overridden from the host env, even if accidentally added
+    # to claude_env_vars.
+    for var in "${_hardcoded_env_vars[@]}"; do unset "_env_whitelist[$var]"; done
 
     while IFS= read -r name; do
         if [[ -n "${_env_whitelist[$name]:-}" || \
@@ -1051,9 +1069,18 @@ fi
 # that lack native OSC 52 support, e.g. Terminator, GNOME Terminal, XFCE Terminal)
 _clipboard_cmd=""
 if [[ "$no_clipboard" != true ]]; then
-    _blaude_dir=$(readlink -f "$0")
-    _blaude_dir=${_blaude_dir%/*}
-    if [[ -x "$_blaude_dir/osc52-clipboard" ]]; then
+    # Derive blaude's directory without forking readlink on the common case.
+    # readlink is only needed when $0 is a symlink (rare — e.g. installed to
+    # /usr/local/bin via `ln -s`).
+    if [[ -L "$0" ]]; then
+        _blaude_dir=$(readlink -f "$0")
+        _blaude_dir=${_blaude_dir%/*}
+    elif [[ "$0" == */* ]]; then
+        _blaude_dir="${0%/*}"
+    else
+        _blaude_dir=""  # bare name via PATH — fall through to command -v
+    fi
+    if [[ -n "$_blaude_dir" && -x "$_blaude_dir/osc52-clipboard" ]]; then
         _clipboard_cmd="$_blaude_dir/osc52-clipboard"
     else
         _clipboard_cmd=$(command -v osc52-clipboard 2>/dev/null || true)

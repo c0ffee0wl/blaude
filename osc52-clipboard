@@ -52,7 +52,7 @@ def _copy_to_clipboard(payload, clip_cmd):
         subprocess.run(clip_cmd, input=base64.b64decode(payload), check=False,
                        timeout=_CLIPBOARD_TIMEOUT,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception as e:
+    except (subprocess.SubprocessError, OSError) as e:
         if _OSC52_DEBUG:
             print(f"osc52-clipboard: copy failed: {e}", file=sys.stderr)
 
@@ -200,12 +200,20 @@ def _proxy(argv, master_read):
         _copy_winsize()
         signal.signal(signal.SIGWINCH, lambda *_: _copy_winsize())
 
+        # Mark restore=True as soon as tcgetattr succeeds — even if setraw
+        # later fails, we still want to restore the captured attrs on exit
+        # (setraw may have half-modified the terminal before raising).
+        restore = False
         try:
             old_attrs = termios.tcgetattr(real_stdin)
-            tty.setraw(real_stdin)
             restore = True
         except termios.error:
-            restore = False
+            pass
+        if restore:
+            try:
+                tty.setraw(real_stdin)
+            except termios.error:
+                pass
 
         try:
             fds = [real_stdin, master_fd]
@@ -241,6 +249,9 @@ def _proxy(argv, master_read):
             if restore:
                 termios.tcsetattr(real_stdin, termios.TCSAFLUSH, old_attrs)
     finally:
+        # Restore SIGWINCH before closing master_fd — the handler dereferences
+        # master_fd, and a late signal after close could hit a reused fd.
+        signal.signal(signal.SIGWINCH, signal.SIG_DFL)
         os.close(master_fd)
 
     _, status = os.waitpid(child_pid, 0)
