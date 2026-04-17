@@ -681,18 +681,21 @@ for mount_spec in "${mount_args[@]}"; do
         host_path="$resolved_path"
     fi
 
-    bwrap_args+=(--$mount_mode "$host_path" "$host_path")
+    bwrap_args+=(--"$mount_mode" "$host_path" "$host_path")
 done
 
 if [[ "$tmp_mode" == true ]]; then
     bwrap_args+=(--chdir /tmp)
 else
-    # Reject $HOME as workspace (would expose entire home directory read-write)
-    resolved_workspace=$(readlink -f "$current_dir")
-    if [[ "$resolved_workspace" == "$HOME" && "$allow_protected_writes" != true ]]; then
-        echo "Error: Refusing to sandbox home directory as workspace." >&2
-        echo "  Use a subdirectory instead, --tmp, or --allow-protected-writes to override." >&2
-        exit 1
+    # Reject $HOME as workspace (would expose entire home directory read-write).
+    # Skip the readlink -f fork entirely when the override is set.
+    if [[ "$allow_protected_writes" != true ]]; then
+        resolved_workspace=$(readlink -f "$current_dir")
+        if [[ "$resolved_workspace" == "$HOME" ]]; then
+            echo "Error: Refusing to sandbox home directory as workspace." >&2
+            echo "  Use a subdirectory instead, --tmp, or --allow-protected-writes to override." >&2
+            exit 1
+        fi
     fi
 
     workspace="/workspaces/$safe_dir_name"
@@ -711,14 +714,23 @@ else
     # Root-level dotfiles (.bashrc etc.) have no overlayable parent — only protected
     # if they already exist (low risk: uncommon in project directories).
     if [[ "$allow_protected_writes" != true ]]; then
-        # Overlay support added in bwrap 0.8.0. Detect per-launch (not cached) so
-        # bwrap upgrades take effect immediately — stale cache could silently
-        # downgrade overlay→ro-bind and create host stubs.
-        if bwrap --help 2>&1 | grep -q '\-\-tmp-overlay'; then
+        # Overlay support added in bwrap 0.8.0. Cache keyed on bwrap binary mtime
+        # (bash -nt, no fork) so upgrades take effect immediately without forking
+        # `bwrap --help | grep` on every launch.
+        _bwrap_bin=$(command -v bwrap)
+        _overlay_cache="/tmp/blaude-overlay-${UID:-$_host_uid}"
+        if [[ -f "$_overlay_cache" && ! "$_bwrap_bin" -nt "$_overlay_cache" ]]; then
+            IFS= read -r _has_overlay < "$_overlay_cache"
+        else
+            bwrap --help 2>&1 | grep -q '\-\-tmp-overlay' && _has_overlay=true || _has_overlay=false
+            printf '%s' "$_has_overlay" > "$_overlay_cache" 2>/dev/null || true
+        fi
+        if [[ "$_has_overlay" == true ]]; then
             _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
             _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
         fi
+        unset _bwrap_bin _overlay_cache _has_overlay
         _protect_file() { bwrap_args+=(--ro-bind "$1" "$2"); }
 
         for f in .bashrc .bash_profile .zshrc .zprofile .profile \

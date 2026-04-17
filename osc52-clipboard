@@ -259,7 +259,10 @@ def main():
 
     clip_cmd = _detect_clipboard()
     if clip_cmd is None:
-        print("osc52-clipboard: no clipboard tool found (need xclip, xsel, or wl-copy)", file=sys.stderr)
+        # Silent fallthrough: blaude auto-activates this wrapper whenever it's on
+        # disk, so a missing clipboard tool is the norm on headless systems.
+        if _OSC52_DEBUG:
+            print("osc52-clipboard: no clipboard tool found (need xclip, xsel, or wl-copy)", file=sys.stderr)
         os.execvp(sys.argv[1], sys.argv[1:])
 
     scanner = _OSC52Scanner(clip_cmd)
