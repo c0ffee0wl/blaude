@@ -104,38 +104,37 @@ clear_tmp_mode=false
 no_clipboard=false
 
 # Session-cache a boolean result at /tmp/blaude-<key>-$UID to avoid repeated
-# proc/help checks within a session. Compute fn should echo "true" or "false".
+# proc/help checks within a session. Compute fn must set _CACHED_BOOL_RESULT.
+# Result is returned via the global _CACHED_BOOL_RESULT — assigning instead of
+# printing avoids the $(...) fork on every cache hit.
 # Optional 3rd arg: invalidate cache when that path is newer (stat via bash -nt,
 # no fork) — used by callers whose answer can change when a binary is upgraded.
+_CACHED_BOOL_RESULT=""
 _cached_bool() {
     local key="$1" compute_fn="$2" invalidate_path="${3:-}"
     local cache="/tmp/blaude-${key}-${UID:-$_host_uid}"
-    local val
     if [[ -f "$cache" ]] && \
        { [[ -z "$invalidate_path" ]] || [[ ! "$invalidate_path" -nt "$cache" ]]; }; then
-        IFS= read -r val < "$cache"
-        printf '%s' "$val"
+        IFS= read -r _CACHED_BOOL_RESULT < "$cache"
         return
     fi
-    val=$("$compute_fn")
-    printf '%s\n' "$val" > "$cache" 2>/dev/null || true
-    printf '%s' "$val"
+    "$compute_fn"
+    printf '%s\n' "$_CACHED_BOOL_RESULT" > "$cache" 2>/dev/null || true
 }
 
-# Subshell body (() instead of {}) so `shopt -s nocasematch` doesn't leak to
-# the caller. Matches the `grep -i` semantics of the previous implementation.
-_detect_wsl() (
-    shopt -s nocasematch
+# ${var,,} lowercases — matches `grep -i` semantics without shopt manipulation.
+_detect_wsl() {
     local osrelease="" version=""
     [[ -r /proc/sys/kernel/osrelease ]] && IFS= read -r osrelease < /proc/sys/kernel/osrelease
     [[ -r /proc/version ]] && IFS= read -r version < /proc/version
-    if [[ "$osrelease" == *microsoft* || "$version" == *microsoft* ]]; then
-        echo true
+    if [[ "${osrelease,,}" == *microsoft* || "${version,,}" == *microsoft* ]]; then
+        _CACHED_BOOL_RESULT=true
     else
-        echo false
+        _CACHED_BOOL_RESULT=false
     fi
-)
-wsl_mode=$(_cached_bool wsl _detect_wsl)
+}
+_cached_bool wsl _detect_wsl
+wsl_mode=$_CACHED_BOOL_RESULT
 
 # Find asciinema's PID by walking ancestor processes via /proc.
 _find_asciinema_pid() {
@@ -246,17 +245,19 @@ required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted"
 have_jq=""  # lazy: probed on first merge_config_flags fallthrough
 
 merge_config_flags() {
-    local file="$1"
-    mkdir -p "${file%/*}"
+    local file="$1" dir="${1%/*}"
+    [[ -d "$dir" ]] || mkdir -p "$dir"
     if [[ ! -f "$file" ]]; then
         echo "$required_flags" > "$file"
         return
     fi
-    # Cheap pre-check avoids forking jq on every launch when flags are already set.
-    # grep is faster than jq startup here; false negatives (unusual JSON formatting)
-    # fall through to the jq path below.
-    grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' "$file" && \
-       grep -q '"bypassPermissionsModeAccepted"[[:space:]]*:[[:space:]]*true' "$file" && return
+    # Cheap pre-check avoids forking jq (and two greps) on every launch when flags
+    # are already set. Slurp the file once and regex-match both flags via bash;
+    # false negatives (unusual JSON formatting) fall through to the jq path.
+    local contents re1='"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true'
+    local re2='"bypassPermissionsModeAccepted"[[:space:]]*:[[:space:]]*true'
+    contents=$(< "$file")
+    [[ "$contents" =~ $re1 && "$contents" =~ $re2 ]] && return
     [[ -z "$have_jq" ]] && { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
     [[ "$have_jq" == true ]] || return
     jq -e '.hasCompletedOnboarding == true and .bypassPermissionsModeAccepted == true' "$file" >/dev/null 2>&1 && return
@@ -547,7 +548,7 @@ _mount_host_bin "$HOME/go/bin" host-go-bin
 _bind_if_exists "$HOME/.local/share/claude" d ro-bind
 
 # Ensure config directory exists on host and create mount point inside sandbox
-mkdir -p "$config_dir"
+[[ -d "$config_dir" ]] || mkdir -p "$config_dir"
 bwrap_args+=(--dir "$config_dir")
 bwrap_args+=(--bind "$config_dir" "$config_dir")
 
@@ -729,9 +730,10 @@ else
         _detect_overlay() {
             local help
             help=$(bwrap --help 2>&1)
-            [[ "$help" == *--tmp-overlay* ]] && echo true || echo false
+            [[ "$help" == *--tmp-overlay* ]] && _CACHED_BOOL_RESULT=true || _CACHED_BOOL_RESULT=false
         }
-        if [[ "$(_cached_bool overlay _detect_overlay "$_bwrap_bin")" == true ]]; then
+        _cached_bool overlay _detect_overlay "$_bwrap_bin"
+        if [[ "$_CACHED_BOOL_RESULT" == true ]]; then
             _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
             _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
@@ -1040,15 +1042,10 @@ fi
 # --- Execute ---
 
 if [[ "$debug" == true ]]; then
-    # Print command in a way that can be copy-pasted
+    # printf %q emits a shell-safe, copy-pasteable representation for every
+    # metacharacter (space, quote, $, `, \, glob chars, ...).
     printf '\e[2mbwrap' >&2
-    for arg in "${bwrap_args[@]}"; do
-        if [[ "$arg" == *" "* || "$arg" == *"'"* ]]; then
-            printf ' "%s"' "$arg" >&2
-        else
-            printf ' %s' "$arg" >&2
-        fi
-    done
+    printf ' %q' "${bwrap_args[@]}" >&2
     printf '\e[0m\n' >&2
 fi
 
