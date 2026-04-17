@@ -22,9 +22,18 @@ if [[ "${1:-}" =~ ^(update|install|install-github-app)$ ]]; then
     exec claude "$@"
 fi
 
+# AppArmor detection (shared by fix-apparmor subcommand and startup warning)
+_apparmor_present() {
+    [[ -d /sys/module/apparmor ]] && command -v apparmor_parser &>/dev/null
+}
+_apparmor_restricts_userns() {
+    [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] || return 1
+    [[ "$(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == "1" ]]
+}
+
 # fix-apparmor: install AppArmor profile to allow bwrap user namespaces (Ubuntu 24.04+)
 if [[ "${1:-}" == "fix-apparmor" ]]; then
-    if ! command -v apparmor_parser &>/dev/null || [[ ! -d /sys/module/apparmor ]]; then
+    if ! _apparmor_present; then
         echo "AppArmor is not active on this system. No fix needed." >&2
         exit 0
     fi
@@ -32,8 +41,7 @@ if [[ "${1:-}" == "fix-apparmor" ]]; then
         echo "AppArmor bwrap profile already exists at /etc/apparmor.d/bwrap" >&2
         exit 0
     fi
-    if [[ ! -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] || \
-       [[ "$(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" != "1" ]]; then
+    if ! _apparmor_restricts_userns; then
         echo "Unprivileged user namespaces are not restricted. No fix needed." >&2
         exit 0
     fi
@@ -62,10 +70,10 @@ APPARMOR
     exit 0
 fi
 
-current_dir=$(pwd)
+current_dir=$PWD
 dir_name="${current_dir##*/}"
-_host_uid=$(id -u)
-_host_gid=$(id -g)
+_host_uid=$EUID
+_host_gid=${GROUPS[0]}
 # Sanitize directory name (colons can cause issues in bwrap mount paths)
 safe_dir_name="${dir_name//:/-}"
 
@@ -96,19 +104,30 @@ chic_mode=false
 clear_tmp_mode=false
 no_clipboard=false
 
-# Auto-detect WSL (check both osrelease and /proc/version for robustness)
-# Cache result in /tmp to avoid repeated proc checks within a session
-wsl_cache="/tmp/blaude-wsl-${UID:-$_host_uid}"
-if [[ -f "$wsl_cache" ]]; then
-    wsl_mode=$(< "$wsl_cache")
-else
-    wsl_mode=false
+# Session-cache a boolean result at /tmp/blaude-<key>-$UID to avoid repeated
+# proc/help checks within a session. Compute fn should echo "true" or "false".
+_cached_bool() {
+    local key="$1" compute_fn="$2"
+    local cache="/tmp/blaude-${key}-${UID:-$_host_uid}"
+    if [[ -f "$cache" ]]; then
+        printf '%s' "$(<"$cache")"
+        return
+    fi
+    local val
+    val=$("$compute_fn")
+    printf '%s\n' "$val" > "$cache" 2>/dev/null || true
+    printf '%s' "$val"
+}
+
+_detect_wsl() {
     if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null || \
        grep -qi microsoft /proc/version 2>/dev/null; then
-        wsl_mode=true
+        echo true
+    else
+        echo false
     fi
-    echo "$wsl_mode" > "$wsl_cache" 2>/dev/null || true
-fi
+}
+wsl_mode=$(_cached_bool wsl _detect_wsl)
 
 # Find asciinema's PID by walking ancestor processes via /proc.
 _find_asciinema_pid() {
@@ -253,13 +272,34 @@ bwrap_args=(
 
 bwrap_args+=(--unshare-user --uid "$sandbox_uid" --gid "$sandbox_gid")
 
+# --- Mount helpers ---
+# Bind <path> at its own location if it exists.
+# kind: f (file) or d (directory); mode: ro-bind or bind
+_bind_if_exists() {
+    local path="$1" kind="$2" mode="$3"
+    [[ -z "$path" ]] && return
+    if [[ "$kind" == f ]]; then
+        [[ -f "$path" ]] || return
+    else
+        [[ -d "$path" ]] || return
+    fi
+    bwrap_args+=(--"$mode" "$path" "$path")
+}
+# Ensure directory exists (creating if needed), then bind-mount at its own location.
+_ensure_and_bind() {
+    local path="$1" mode="$2"
+    [[ -d "$path" ]] || mkdir -p "$path" 2>/dev/null
+    _bind_if_exists "$path" d "$mode"
+}
+_dbg() { [[ "$debug" == true ]] && echo "$@" >&2; }
+
 # System mounts (read-only)
 bwrap_args+=(--ro-bind /usr /usr)
-[[ -d /lib ]] && bwrap_args+=(--ro-bind /lib /lib)
-[[ -d /lib64 ]] && bwrap_args+=(--ro-bind /lib64 /lib64)
-[[ -d /lib32 ]] && bwrap_args+=(--ro-bind /lib32 /lib32)
+_bind_if_exists /lib d ro-bind
+_bind_if_exists /lib64 d ro-bind
+_bind_if_exists /lib32 d ro-bind
 bwrap_args+=(--ro-bind /bin /bin)
-[[ -d /sbin ]] && bwrap_args+=(--ro-bind /sbin /sbin)
+_bind_if_exists /sbin d ro-bind
 # Mount /etc read-only, but handle resolv.conf symlink specially for WSL2/systemd
 # bwrap's --file and bind mounts follow symlinks, so if /etc/resolv.conf is a symlink
 # to e.g. /run/systemd/resolve/stub-resolv.conf, we need to create that target path
@@ -273,7 +313,10 @@ trap '_blaude_cleanup' EXIT
 resolv_symlink_target=""
 resolv_symlink_dir=""
 resolv_tmp=""
-if [[ -L /etc/resolv.conf ]]; then
+_setup_resolv() {
+    [[ -L /etc/resolv.conf ]] || return
+    # readlink (no -f): need the raw link target to distinguish absolute vs relative.
+    local resolv_target
     resolv_target=$(readlink /etc/resolv.conf)
     resolv_tmp=$(mktemp)
     if ! cat /etc/resolv.conf > "$resolv_tmp" 2>/dev/null || [[ ! -s "$resolv_tmp" ]]; then
@@ -284,10 +327,9 @@ if [[ -L /etc/resolv.conf ]]; then
         resolv_symlink_target="$resolv_target"
         resolv_symlink_dir="${resolv_target%/*}"
     fi
-fi
+}
+_setup_resolv
 bwrap_args+=(--ro-bind /etc /etc)
-# /usr/share is already included via /usr, but ensure it's accessible for tools needing
-# terminfo, locales, ca-certificates, etc.
 
 # Writable overlay for pyenv shims (pyenv init tries to write here)
 if [[ -d /usr/share/pyenv/shims ]]; then
@@ -321,14 +363,15 @@ if [[ "$keyring_mode" == true ]]; then
             dbus_socket="${DBUS_SESSION_BUS_ADDRESS#*unix:path=}"
             dbus_socket="${dbus_socket%%,*}"
         elif [[ "$DBUS_SESSION_BUS_ADDRESS" == *"unix:abstract="* ]]; then
-            [[ "$debug" == true ]] && echo "Warning: D-Bus uses abstract socket (won't work in sandbox)" >&2
+            # Surface unconditionally: --keyring was explicitly requested but won't work.
+            echo "Warning: D-Bus uses abstract socket (won't work in sandbox)" >&2
         fi
     fi
     [[ -z "$dbus_socket" ]] && dbus_socket="/run/user/$_host_uid/bus"
 
     if [[ -S "$dbus_socket" ]]; then
         bwrap_args+=(--bind "$dbus_socket" "$dbus_socket")
-        [[ "$debug" == true ]] && echo "Binding D-Bus session socket: $dbus_socket" >&2
+        _dbg "Binding D-Bus session socket: $dbus_socket"
     fi
 fi
 
@@ -373,16 +416,11 @@ bwrap_args+=(
 # GNOME Keyring storage (optional, only with --keyring flag)
 if [[ "$keyring_mode" == true ]]; then
     keyrings_dir="$HOME/.local/share/keyrings"
-    if [[ -d "$keyrings_dir" ]]; then
-        [[ "$debug" == true ]] && echo "Binding GNOME Keyring storage: $keyrings_dir" >&2
-        bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
-    else
-        mkdir -p "$keyrings_dir" 2>/dev/null
-        [[ -d "$keyrings_dir" ]] && bwrap_args+=(--bind "$keyrings_dir" "$keyrings_dir")
-    fi
+    _dbg "Binding GNOME Keyring storage: $keyrings_dir"
+    _ensure_and_bind "$keyrings_dir" bind
 fi
 
-# npm cache: bind host's cache if exists (for npx-based MCP servers), else create empty
+# npm cache: bind host's cache if exists (for npx-based MCP servers), else ephemeral.
 if [[ -d "$HOME/.npm" ]]; then
     bwrap_args+=(--bind "$HOME/.npm" "$HOME/.npm")
 else
@@ -402,31 +440,23 @@ _mount_host_bin() {
 
 _mount_host_bin "$HOME/.local/bin" host-bin
 
-# Bind claude binary to its expected location (Claude Code checks for itself there)
-if [[ -e "$HOME/.local/bin/claude" ]]; then
+# Bind claude binary (Claude Code checks for itself there).
+# -e (not -f) so symlinks to claude are also bound.
+[[ -e "$HOME/.local/bin/claude" ]] && \
     bwrap_args+=(--ro-bind "$HOME/.local/bin/claude" "$HOME/.local/bin/claude")
-fi
 
 # Bind pipx virtual environments (symlink targets for pipx-installed tools)
-if [[ -d "$HOME/.local/share/pipx" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.local/share/pipx" "$HOME/.local/share/pipx")
-fi
+_bind_if_exists "$HOME/.local/share/pipx" d ro-bind
 
 # Bind uv tools directory (for uv-installed MCP servers like notebooklm-mcp)
 # These are symlink targets for tools in ~/.local/bin installed via `uv tool install`
-if [[ -d "$HOME/.local/share/uv/tools" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.local/share/uv/tools" "$HOME/.local/share/uv/tools")
-fi
+_bind_if_exists "$HOME/.local/share/uv/tools" d ro-bind
 
 # Bind uv-managed Python installations (some uv tools use these instead of system Python)
-if [[ -d "$HOME/.local/share/uv/python" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.local/share/uv/python" "$HOME/.local/share/uv/python")
-fi
+_bind_if_exists "$HOME/.local/share/uv/python" d ro-bind
 
 # uv cache: bind if exists for faster tool installs, else leave ephemeral
-if [[ -d "$HOME/.cache/uv" ]]; then
-    bwrap_args+=(--bind "$HOME/.cache/uv" "$HOME/.cache/uv")
-fi
+_bind_if_exists "$HOME/.cache/uv" d bind
 
 # Resolve symlinks under a package manager directory, find their package roots,
 # and mount them read-only. Also mounts MCP token files read-write for persistence.
@@ -442,20 +472,21 @@ _mount_linked_packages() {
         # Walk up to package root (directory with package.json)
         local link_dir="$target"
         while [[ "$link_dir" != "/" && "$link_dir" != "$HOME" && ! -f "$link_dir/package.json" ]]; do
-            link_dir=$(dirname "$link_dir")
+            link_dir=${link_dir%/*}
+            [[ -z "$link_dir" ]] && link_dir=/
         done
         [[ -f "$link_dir/package.json" && "$link_dir" != "$HOME" ]] && link_targets["$link_dir"]=1
     done < <(find "$@" -print0 2>/dev/null)
 
     for link_target in "${!link_targets[@]}"; do
-        [[ "$debug" == true ]] && echo "Auto-mounting ${label}-linked package: $link_target" >&2
+        _dbg "Auto-mounting ${label}-linked package: $link_target"
         bwrap_args+=(--ro-bind "$link_target" "$link_target")
         # MCP token files — create if needed for bind mount, mount read-write for persistence
         for token_file in ".token-cache.json" ".selected-account.json"; do
             local token_path="$link_target/$token_file"
             [[ ! -f "$token_path" ]] && touch "$token_path" 2>/dev/null
             if [[ -f "$token_path" ]]; then
-                [[ "$debug" == true ]] && echo "  Mounting token file read-write: $token_path" >&2
+                _dbg "  Mounting token file read-write: $token_path"
                 bwrap_args+=(--bind "$token_path" "$token_path")
             fi
         done
@@ -478,9 +509,7 @@ _mount_host_bin "$HOME/go/bin" host-go-bin
 
 # Bind claude's data directory read-only if it exists
 # DISABLE_AUTOUPDATER=1 is set below, so no write access needed
-if [[ -d "$HOME/.local/share/claude" ]]; then
-    bwrap_args+=(--ro-bind "$HOME/.local/share/claude" "$HOME/.local/share/claude")
-fi
+_bind_if_exists "$HOME/.local/share/claude" d ro-bind
 
 # Ensure config directory exists on host and create mount point inside sandbox
 mkdir -p "$config_dir"
@@ -488,42 +517,30 @@ bwrap_args+=(--dir "$config_dir")
 bwrap_args+=(--bind "$config_dir" "$config_dir")
 
 # Mount ~/.claude.json (OAuth session, MCP servers, preferences, caches)
-if [[ -f "$HOME/.claude.json" ]]; then
-    bwrap_args+=(--bind "$HOME/.claude.json" "$HOME/.claude.json")
-fi
+_bind_if_exists "$HOME/.claude.json" f bind
 
 # claudechic config file (~/.claude/.claudechic.yaml) is already accessible
-# via the config_dir mount above - no separate mount needed.
-# Note: Do NOT bind-mount the specific file, as claudechic uses atomic writes
-# (os.replace) which fail on bind-mounted files.
+# via the config_dir mount above — do NOT bind-mount it directly, as claudechic
+# uses atomic writes (os.replace) which fail on bind-mounted files.
 
 # claudechic debug log (only needed if CLAUDECHIC_DEBUG is set)
 if [[ -n "${CLAUDECHIC_DEBUG:-}" ]]; then
     claudechic_log="$HOME/claudechic.log"
     touch "$claudechic_log" 2>/dev/null
-    [[ -f "$claudechic_log" ]] && bwrap_args+=(--bind "$claudechic_log" "$claudechic_log")
+    _bind_if_exists "$claudechic_log" f bind
 fi
 
 # notebooklm-mcp auth directories (token cache, Chrome profiles, config)
 for notebooklm_dir in "$HOME/.notebooklm-mcp" "$HOME/.notebooklm-mcp-cli"; do
-    if [[ -d "$notebooklm_dir" ]]; then
-        bwrap_args+=(--bind "$notebooklm_dir" "$notebooklm_dir")
-    else
-        mkdir -p "$notebooklm_dir" 2>/dev/null
-        [[ -d "$notebooklm_dir" ]] && bwrap_args+=(--bind "$notebooklm_dir" "$notebooklm_dir")
-    fi
+    _ensure_and_bind "$notebooklm_dir" bind
 done
 
 # User config directory (~/.config/)
 # Includes uv config (python-preference), fabric, google-chrome, and other tool configs
-if [[ -d "$HOME/.config" ]]; then
-    bwrap_args+=(--bind "$HOME/.config" "$HOME/.config")
-fi
+_bind_if_exists "$HOME/.config" d bind
 
 # arxiv-storage directory (for research paper management tools)
-if [[ -d "$HOME/arxiv-storage" ]]; then
-    bwrap_args+=(--bind "$HOME/arxiv-storage" "$HOME/arxiv-storage")
-fi
+_bind_if_exists "$HOME/arxiv-storage" d bind
 
 # Claude memory directory (for persistent memory across sessions)
 # Auto-create if claude-mem plugin is installed but data dir doesn't exist yet
@@ -534,17 +551,13 @@ if [[ ! -d "$HOME/.claude-mem" ]]; then
         mkdir -p "$HOME/.claude-mem"
     fi
 fi
-if [[ -d "$HOME/.claude-mem" ]]; then
-    bwrap_args+=(--bind "$HOME/.claude-mem" "$HOME/.claude-mem")
-fi
+_bind_if_exists "$HOME/.claude-mem" d bind
 
 # Bun runtime and package manager
 if [[ -d "$HOME/.bun" ]]; then
     bwrap_args+=(--ro-bind "$HOME/.bun" "$HOME/.bun")
     # Bun runtime needs writable install cache (plugins like claude-mem run bun install)
-    if [[ -d "$HOME/.bun/install/cache" ]]; then
-        bwrap_args+=(--tmpfs "$HOME/.bun/install/cache")
-    fi
+    [[ -d "$HOME/.bun/install/cache" ]] && bwrap_args+=(--tmpfs "$HOME/.bun/install/cache")
     # Scan bin/ and global node_modules/ separately to avoid traversing ~/.bun/install/cache
     _mount_linked_packages "bun" "$HOME/.bun" \
         "$HOME/.bun/bin" -type l
@@ -559,47 +572,28 @@ fi
 
 # Bind a file/dir named by an env var, if set and existing, at its host path.
 # kind: f (file) or d (directory); mode: ro-bind or bind
-_bind_env_path() {
-    local var="$1" kind="$2" mode="$3"
-    local val="${!var:-}"
-    [[ -z "$val" ]] && return
-    if [[ "$kind" == f ]]; then
-        [[ -f "$val" ]] || return
-    else
-        [[ -d "$val" ]] || return
-    fi
-    bwrap_args+=(--"$mode" "$val" "$val")
-}
+_bind_env_path() { _bind_if_exists "${!1:-}" "$2" "$3"; }
 
 # Git mode: mount git configuration files and pass GitHub tokens
 if [[ "$git_mode" == true ]]; then
-    if [[ -f "$HOME/.gitconfig" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.gitconfig" "$HOME/.gitconfig")
-    fi
-    if [[ -f "$HOME/.git-credentials" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.git-credentials" "$HOME/.git-credentials")
-    fi
+    _bind_if_exists "$HOME/.gitconfig" f ro-bind
+    _bind_if_exists "$HOME/.git-credentials" f ro-bind
     # GitHub tokens (for gh CLI, git push/pull, MCP servers)
     for var in GH_TOKEN GITHUB_TOKEN; do
-        if [[ -n "${!var:-}" ]]; then
-            bwrap_args+=(--setenv "$var" "${!var}")
-        fi
+        [[ -n "${!var:-}" ]] && bwrap_args+=(--setenv "$var" "${!var}")
     done
 fi
 
 # SSH mode: mount SSH keys and forward SSH agent
 if [[ "$ssh_mode" == true ]]; then
-    if [[ -d "$HOME/.ssh" ]]; then
-        bwrap_args+=(--ro-bind "$HOME/.ssh" "$HOME/.ssh")
-    fi
-    if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
+    _bind_if_exists "$HOME/.ssh" d ro-bind
+    [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]] && \
         bwrap_args+=(--bind "$SSH_AUTH_SOCK" "$SSH_AUTH_SOCK")
-    fi
 fi
 
 # AWS mode: mount AWS config/credentials for Bedrock authentication
 if [[ "$aws_mode" == true ]]; then
-    [[ -d "$HOME/.aws" ]] && bwrap_args+=(--ro-bind "$HOME/.aws" "$HOME/.aws")
+    _bind_if_exists "$HOME/.aws" d ro-bind
     _bind_env_path GOOGLE_APPLICATION_CREDENTIALS f ro-bind
 fi
 
@@ -692,16 +686,15 @@ else
     # Root-level dotfiles (.bashrc etc.) have no overlayable parent — only protected
     # if they already exist (low risk: uncommon in project directories).
     if [[ "$allow_protected_writes" != true ]]; then
-        # Detect bwrap overlay support (added in bwrap 0.8.0). Session-cached to avoid
-        # spawning bwrap + grep on every launch.
-        overlay_cache="/tmp/blaude-overlay-${UID:-$_host_uid}"
-        if [[ -f "$overlay_cache" ]]; then
-            bwrap_has_overlay=$(< "$overlay_cache")
-        else
-            bwrap_has_overlay=false
-            bwrap --help 2>&1 | grep -q '\-\-tmp-overlay' && bwrap_has_overlay=true
-            echo "$bwrap_has_overlay" > "$overlay_cache" 2>/dev/null || true
-        fi
+        # Overlay support added in bwrap 0.8.0; session-cached.
+        _detect_bwrap_overlay() {
+            if bwrap --help 2>&1 | grep -q '\-\-tmp-overlay'; then
+                echo true
+            else
+                echo false
+            fi
+        }
+        bwrap_has_overlay=$(_cached_bool overlay _detect_bwrap_overlay)
         if [[ "$bwrap_has_overlay" == true ]]; then
             _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
@@ -762,9 +755,13 @@ elif [[ "$nvm_installed" == true ]]; then
         fi
         [[ -d "$HOME/.nvm/versions/node/$nvm_version/bin" ]] && nvm_node_bin="$HOME/.nvm/versions/node/$nvm_version/bin"
     fi
-    # Fall back to most recently modified node version
+    # Fall back to most recently modified node version (globbing avoids parsing ls output).
     if [[ -z "$nvm_node_bin" && -d "$HOME/.nvm/versions/node" ]]; then
-        nvm_node_bin=$(ls -td "$HOME/.nvm/versions/node"/*/bin 2>/dev/null | head -1)
+        for _nvm_bin in "$HOME/.nvm/versions/node"/*/bin; do
+            [[ -d "$_nvm_bin" ]] || continue
+            [[ -z "$nvm_node_bin" || "$_nvm_bin" -nt "$nvm_node_bin" ]] && nvm_node_bin="$_nvm_bin"
+        done
+        unset _nvm_bin
     fi
     [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
 fi
@@ -951,18 +948,19 @@ claude_env_vars=(
     NOTEBOOKLM_MCP_TRANSPORT NOTEBOOKLM_MCP_HOST NOTEBOOKLM_MCP_PORT
     NOTEBOOKLM_MCP_DEBUG NOTEBOOKLM_QUERY_TIMEOUT NOTEBOOKLM_BL
 )
-# Only passthrough specific vars when environment is cleared (default)
+# Only passthrough specific vars when environment is cleared (default).
+# Single pass over exported env vars, matched against the whitelist set and glob patterns.
 if [[ "$keep_env_mode" != true ]]; then
-    for var in "${claude_env_vars[@]}"; do
-        if [[ -n "${!var:-}" ]]; then
-            bwrap_args+=(--setenv "$var" "${!var}")
-        fi
-    done
+    declare -A _env_whitelist
+    for var in "${claude_env_vars[@]}"; do _env_whitelist[$var]=1; done
 
-    # Auto-passthrough any *_WEBHOOK, WEBSHARE_*, and CLAUDE_MEM_* environment variables
     while IFS= read -r name; do
-        [[ "$name" == *_WEBHOOK || "$name" == WEBSHARE_* || "$name" == CLAUDE_MEM_* ]] && bwrap_args+=(--setenv "$name" "${!name}")
+        if [[ -n "${_env_whitelist[$name]:-}" || \
+              "$name" == *_WEBHOOK || "$name" == WEBSHARE_* || "$name" == CLAUDE_MEM_* ]]; then
+            [[ -n "${!name:-}" ]] && bwrap_args+=(--setenv "$name" "${!name}")
+        fi
     done < <(compgen -e)
+    unset _env_whitelist
 
     # D-Bus session bus address (only with --keyring flag)
     if [[ "$keyring_mode" == true && -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]]; then
@@ -1026,7 +1024,7 @@ _asciinema_pid=""
 if [[ "${ASCIINEMA_REC:-}" == "1" ]]; then
     _asciinema_pid=$(_find_asciinema_pid)
     if [[ -n "$_asciinema_pid" ]]; then
-        [[ "$debug" == true ]] && echo "Pausing asciinema (PID $_asciinema_pid)" >&2
+        _dbg "Pausing asciinema (PID $_asciinema_pid)"
     fi
 fi
 
@@ -1034,7 +1032,8 @@ fi
 # that lack native OSC 52 support, e.g. Terminator, GNOME Terminal, XFCE Terminal)
 _clipboard_cmd=""
 if [[ "$no_clipboard" != true ]]; then
-    _blaude_dir=$(dirname "$(readlink -f "$0")")
+    _blaude_dir=$(readlink -f "$0")
+    _blaude_dir=${_blaude_dir%/*}
     if [[ -x "$_blaude_dir/osc52-clipboard" ]]; then
         _clipboard_cmd="$_blaude_dir/osc52-clipboard"
     elif command -v osc52-clipboard &>/dev/null; then
@@ -1042,19 +1041,16 @@ if [[ "$no_clipboard" != true ]]; then
     fi
 fi
 if [[ -n "$_clipboard_cmd" ]]; then
-    [[ "$debug" == true ]] && echo "Clipboard proxy: $_clipboard_cmd" >&2
+    _dbg "Clipboard proxy: $_clipboard_cmd"
     final_cmd=("$_clipboard_cmd" bwrap "${bwrap_args[@]}")
 else
     final_cmd=(bwrap "${bwrap_args[@]}")
 fi
 
-# Detect AppArmor user namespace restriction (Ubuntu 24.04+)
-# bwrap needs user namespaces, which AppArmor may block by default
-if command -v apparmor_parser &>/dev/null && \
-   [[ -d /sys/module/apparmor ]] && \
-   [[ -f /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] && \
-   [[ "$(< /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == "1" ]] && \
-   [[ ! -f /etc/apparmor.d/bwrap ]]; then
+# Detect AppArmor user namespace restriction (Ubuntu 24.04+).
+# bwrap needs user namespaces, which AppArmor may block by default.
+# _apparmor_restricts_userns short-circuits cheaply on non-AppArmor systems.
+if _apparmor_restricts_userns && _apparmor_present && [[ ! -f /etc/apparmor.d/bwrap ]]; then
     echo "Warning: AppArmor is restricting unprivileged user namespaces." >&2
     echo "  bwrap may fail with 'Operation not permitted' on this system." >&2
     echo "  Fix with: blaude fix-apparmor" >&2
@@ -1067,7 +1063,7 @@ fi
 #   - https://github.com/microsoft/WSL/issues/13105 (follow-up, still open)
 # The only reliable fix is to use the native ext4 filesystem (/home/...) instead.
 if [[ "$wsl_mode" == true ]]; then
-    [[ "$debug" == true ]] && echo "WSL2 detected: applying workarounds" >&2
+    _dbg "WSL2 detected: applying workarounds"
 
     # Warn if workspace is on Windows filesystem (9P) - once per session
     wsl_mnt_warned="/tmp/blaude-mnt-warned-${UID:-$_host_uid}"

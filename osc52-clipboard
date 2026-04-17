@@ -21,7 +21,11 @@ import sys
 import termios
 import tty
 
-_CLIPBOARD_TIMEOUT = 3  # seconds — prevent terminal freeze on broken clipboard tools
+_CLIPBOARD_TIMEOUT = 3       # seconds — prevent terminal freeze on broken clipboard tools
+_MAX_PAYLOAD_SIZE = 1_048_576  # 1 MB cap on buffered OSC 52 payload
+_READ_CHUNK_SIZE = 16384     # bytes per PTY read
+_MAX_OSC_HEADER_LEN = 16     # abandon OSC parse if selector header exceeds this
+_OSC52_DEBUG = os.environ.get("OSC52_DEBUG") == "1"
 
 
 # --- Clipboard backend detection ---
@@ -41,14 +45,15 @@ def _detect_clipboard():
 
 
 def _copy_to_clipboard(payload, clip_cmd):
-    """Decode base64 payload and send to clipboard."""
+    """Decode base64 payload and pipe raw bytes to clipboard tool."""
     try:
-        text = base64.b64decode(payload).decode("utf-8", errors="replace")
-        subprocess.run(clip_cmd, input=text.encode(), check=False,
+        # base64.b64decode accepts bytearray; skip UTF-8 decode+encode round-trip.
+        subprocess.run(clip_cmd, input=base64.b64decode(payload), check=False,
                        timeout=_CLIPBOARD_TIMEOUT,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+    except Exception as e:
+        if _OSC52_DEBUG:
+            print(f"osc52-clipboard: copy failed: {e}", file=sys.stderr)
 
 
 # --- OSC 52 state machine scanner ---
@@ -95,7 +100,7 @@ class _OSC52Scanner:
                     j = bel
                 else:
                     j = bel if bel < esc else esc
-                space = 1_048_576 - len(self.buf)  # 1 MB safety cap
+                space = _MAX_PAYLOAD_SIZE - len(self.buf)
                 chunk = j - i
                 if chunk > space:
                     self.state = _PASSTHROUGH
@@ -129,7 +134,8 @@ class _OSC52Scanner:
             elif self.state == _IN_OSC:
                 self.buf.append(b)
                 bl = len(self.buf)
-                # Match "52;" incrementally (avoids per-byte bytes(self.buf) copy)
+                # Incremental byte-wise match against b"52;" — avoids copying self.buf
+                # to a bytes object on every byte inside an OSC header.
                 if bl <= 3:
                     if self.buf[-1] != b"52;"[bl - 1]:
                         self.state = _PASSTHROUGH
@@ -141,7 +147,7 @@ class _OSC52Scanner:
                     # BEL or ST (ESC \) terminates an aborted OSC header
                     self.state = _PASSTHROUGH
                     self.buf.clear()
-                elif bl > 16:
+                elif bl > _MAX_OSC_HEADER_LEN:
                     self.state = _PASSTHROUGH
                     self.buf.clear()
             elif self.state == _PAYLOAD_ESC:
@@ -155,7 +161,8 @@ class _OSC52Scanner:
                     self.state = _PASSTHROUGH
 
     def _finish(self):
-        _copy_to_clipboard(bytes(self.buf), self.clip_cmd)
+        # Pass bytearray directly — b64decode accepts it without a bytes() copy.
+        _copy_to_clipboard(self.buf, self.clip_cmd)
         self.state = _PASSTHROUGH
         self.buf.clear()
 
@@ -163,69 +170,71 @@ class _OSC52Scanner:
 # --- PTY proxy with SIGWINCH support ---
 
 def _proxy(argv, master_read):
-    """Spawn a child in a PTY with bidirectional I/O relay and SIGWINCH forwarding."""
+    """Spawn a child in a PTY with bidirectional I/O relay and SIGWINCH forwarding.
+    Returns the child's exit code."""
     child_pid, master_fd = pty.fork()
     if child_pid == 0:
         os.execvp(argv[0], argv)
 
-    real_stdin = sys.stdin.fileno()
-    real_stdout = sys.stdout.fileno()
-
-    def _copy_winsize():
-        try:
-            winsize = fcntl.ioctl(real_stdout, termios.TIOCGWINSZ, b"\x00" * 8)
-            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
-        except OSError:
-            pass
-
-    _copy_winsize()
-    signal.signal(signal.SIGWINCH, lambda *_: _copy_winsize())
-
-    # Set real terminal to raw mode
     try:
-        old_attrs = termios.tcgetattr(real_stdin)
-        tty.setraw(real_stdin)
-        restore = True
-    except termios.error:
-        restore = False
+        real_stdin = sys.stdin.fileno()
+        real_stdout = sys.stdout.fileno()
 
-    try:
-        fds = [real_stdin, master_fd]
-        while fds:
+        def _copy_winsize():
             try:
-                rlist, _, _ = select.select(fds, [], [])
-            except InterruptedError:
-                continue  # SIGWINCH interrupts select — just retry
+                winsize = fcntl.ioctl(real_stdout, termios.TIOCGWINSZ, b"\x00" * 8)
+                fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+            except OSError:
+                pass
 
-            if master_fd in rlist:
-                try:
-                    data = master_read(master_fd)
-                except OSError:
-                    break
-                if not data:
-                    break
-                os.write(real_stdout, data)
+        _copy_winsize()
+        signal.signal(signal.SIGWINCH, lambda *_: _copy_winsize())
 
-            if real_stdin in rlist:
+        try:
+            old_attrs = termios.tcgetattr(real_stdin)
+            tty.setraw(real_stdin)
+            restore = True
+        except termios.error:
+            restore = False
+
+        try:
+            fds = [real_stdin, master_fd]
+            while fds:
                 try:
-                    data = os.read(real_stdin, 16384)
-                except OSError:
-                    fds.remove(real_stdin)
-                    continue
-                if not data:
-                    fds.remove(real_stdin)
-                else:
+                    rlist, _, _ = select.select(fds, [], [])
+                except InterruptedError:
+                    continue  # SIGWINCH interrupts select — just retry
+
+                if master_fd in rlist:
                     try:
-                        os.write(master_fd, data)
+                        data = master_read(master_fd)
                     except OSError:
                         break
+                    if not data:
+                        break
+                    os.write(real_stdout, data)
+
+                if real_stdin in rlist:
+                    try:
+                        data = os.read(real_stdin, _READ_CHUNK_SIZE)
+                    except OSError:
+                        fds.remove(real_stdin)
+                        continue
+                    if not data:
+                        fds.remove(real_stdin)
+                    else:
+                        try:
+                            os.write(master_fd, data)
+                        except OSError:
+                            break
+        finally:
+            if restore:
+                termios.tcsetattr(real_stdin, termios.TCSAFLUSH, old_attrs)
     finally:
-        if restore:
-            termios.tcsetattr(real_stdin, termios.TCSAFLUSH, old_attrs)
         os.close(master_fd)
 
     _, status = os.waitpid(child_pid, 0)
-    return status
+    return os.waitstatus_to_exitcode(status)
 
 
 # --- Main ---
@@ -246,12 +255,11 @@ def main():
     scanner = _OSC52Scanner(clip_cmd)
 
     def master_read(fd):
-        data = os.read(fd, 16384)
+        data = os.read(fd, _READ_CHUNK_SIZE)
         scanner.feed(data)
         return data
 
-    status = _proxy(sys.argv[1:], master_read)
-    sys.exit(os.waitstatus_to_exitcode(status))
+    sys.exit(_proxy(sys.argv[1:], master_read))
 
 
 if __name__ == "__main__":
