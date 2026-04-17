@@ -1,11 +1,10 @@
 #!/bin/bash
-# blaude - Run Claude Code in a bubblewrap sandbox
-# All options except blaude-specific ones are passed directly to claude.
-# See README.md for blaude options: --env, -m/--mount, --git, --ssh, --aws,
-# --no-network, --tmp, --clear-tmp, --keep-env, --debug, --dry-run, --exec
+# blaude - Run Claude Code in a bubblewrap sandbox.
+# Options not listed in README.md are passed through to claude.
 
-# Check for bwrap
-if ! command -v bwrap &>/dev/null; then
+# Check for bwrap (capture path for later reuse — overlay-support mtime check needs it)
+_bwrap_bin=$(command -v bwrap)
+if [[ -z "$_bwrap_bin" ]]; then
     echo "Error: bubblewrap (bwrap) is not installed" >&2
     echo "Install with: apt install bubblewrap  OR  dnf install bubblewrap" >&2
     exit 1
@@ -317,7 +316,6 @@ _blaude_cleanup() {
 trap '_blaude_cleanup' EXIT
 
 resolv_symlink_target=""
-resolv_symlink_dir=""
 resolv_tmp=""
 _setup_resolv() {
     [[ -L /etc/resolv.conf ]] || return
@@ -331,7 +329,6 @@ _setup_resolv() {
     elif [[ "$resolv_target" == /* ]]; then
         # Absolute symlink - create target path after --tmpfs /run is added below
         resolv_symlink_target="$resolv_target"
-        resolv_symlink_dir="${resolv_target%/*}"
     fi
 }
 _setup_resolv
@@ -383,7 +380,7 @@ fi
 # Complete resolv.conf symlink handling (deferred from above, after --tmpfs /run)
 if [[ -n "$resolv_symlink_target" ]]; then
     # Create the symlink target directory and mount our content there
-    bwrap_args+=(--dir "$resolv_symlink_dir")
+    bwrap_args+=(--dir "${resolv_symlink_target%/*}")
     bwrap_args+=(--ro-bind "$resolv_tmp" "$resolv_symlink_target")
 elif [[ -n "$resolv_tmp" ]]; then
     # Relative symlink case - bind mount over /etc/resolv.conf
@@ -717,7 +714,6 @@ else
         # Overlay support added in bwrap 0.8.0. Cache keyed on bwrap binary mtime
         # (bash -nt, no fork) so upgrades take effect immediately without forking
         # `bwrap --help | grep` on every launch.
-        _bwrap_bin=$(command -v bwrap)
         _overlay_cache="/tmp/blaude-overlay-${UID:-$_host_uid}"
         if [[ -f "$_overlay_cache" && ! "$_bwrap_bin" -nt "$_overlay_cache" ]]; then
             IFS= read -r _has_overlay < "$_overlay_cache"
@@ -730,7 +726,7 @@ else
         else
             _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
         fi
-        unset _bwrap_bin _overlay_cache _has_overlay
+        unset _overlay_cache _has_overlay
         _protect_file() { bwrap_args+=(--ro-bind "$1" "$2"); }
 
         for f in .bashrc .bash_profile .zshrc .zprofile .profile \
