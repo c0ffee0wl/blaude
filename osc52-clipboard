@@ -162,13 +162,11 @@ class _OSC52Scanner:
                 if b == 0x5C:  # '\\' — ST terminator (ESC + backslash)
                     _copy_to_clipboard(buf, self.clip_cmd)
                     state = _PASSTHROUGH
-                    buf.clear()
                 elif b == 0x5D:  # ']' — new OSC starting
-                    buf.clear()
                     state = _IN_OSC
                 else:
-                    buf.clear()
                     state = _PASSTHROUGH
+                buf.clear()
         self.state = state
 
 
@@ -260,13 +258,21 @@ def _proxy(argv, master_read):
 
 # --- Main ---
 
+def _exec_bypass():
+    try:
+        os.execvp(sys.argv[1], sys.argv[1:])
+    except OSError as e:
+        print(f"osc52-clipboard: exec failed: {e}", file=sys.stderr)
+        sys.exit(127)
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <command> [args...]", file=sys.stderr)
         sys.exit(1)
 
     if os.environ.get("OSC52_NO_CLIPBOARD") == "1":
-        os.execvp(sys.argv[1], sys.argv[1:])
+        _exec_bypass()
 
     clip_cmd = _detect_clipboard()
     if clip_cmd is None:
@@ -274,7 +280,7 @@ def main():
         # disk, so a missing clipboard tool is the norm on headless systems.
         if _OSC52_DEBUG:
             print("osc52-clipboard: no clipboard tool found (need xclip, xsel, or wl-copy)", file=sys.stderr)
-        os.execvp(sys.argv[1], sys.argv[1:])
+        _exec_bypass()
 
     scanner = _OSC52Scanner(clip_cmd)
 

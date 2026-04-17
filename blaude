@@ -112,7 +112,7 @@ no_clipboard=false
 _CACHED_BOOL_RESULT=""
 _cached_bool() {
     local key="$1" compute_fn="$2" invalidate_path="${3:-}"
-    local cache="/tmp/blaude-${key}-${UID:-$_host_uid}"
+    local cache="/tmp/blaude-${key}-${_host_uid}"
     if [[ -f "$cache" ]] && \
        { [[ -z "$invalidate_path" ]] || [[ ! "$invalidate_path" -nt "$cache" ]]; }; then
         IFS= read -r _CACHED_BOOL_RESULT < "$cache"
@@ -289,7 +289,7 @@ bwrap_args+=(--unshare-user --uid "$sandbox_uid" --gid "$sandbox_gid")
 # --- Mount helpers ---
 # Bind <path> at its own location if it exists.
 # kind: f (file), d (directory), or e (exists — for symlinks etc.)
-# mode: ro-bind, bind, or dev-bind
+# mode: ro-bind or bind
 _bind_if_exists() {
     local path="$1" kind="$2" mode="$3"
     [[ -z "$path" ]] && return
@@ -300,7 +300,7 @@ _bind_if_exists() {
         *) echo "_bind_if_exists: invalid kind '$kind'" >&2; exit 1 ;;
     esac
     case "$mode" in
-        bind|ro-bind|dev-bind) ;;
+        bind|ro-bind) ;;
         *) echo "_bind_if_exists: invalid mode '$mode'" >&2; exit 1 ;;
     esac
     bwrap_args+=(--"$mode" "$path" "$path")
@@ -350,7 +350,7 @@ _setup_resolv() {
     # readlink (no -f): need the raw link target to distinguish absolute vs relative.
     local resolv_target
     resolv_target=$(readlink /etc/resolv.conf)
-    resolv_tmp=$(mktemp)
+    resolv_tmp="/tmp/blaude-resolv-$$"
     if ! cat /etc/resolv.conf > "$resolv_tmp" 2>/dev/null || [[ ! -s "$resolv_tmp" ]]; then
         rm -f "$resolv_tmp"
         resolv_tmp=""
@@ -488,7 +488,7 @@ _mount_linked_packages() {
     shift 2
     local scan_root="$1" scan_key
     scan_key=${scan_root//\//_}
-    local cache_file="/tmp/blaude-pkgmount-${label}-${scan_key}-${UID:-$_host_uid}"
+    local cache_file="/tmp/blaude-pkgmount-${label}-${scan_key}-${_host_uid}"
     local -a link_targets=()
 
     if [[ -f "$cache_file" && ! "$scan_root" -nt "$cache_file" ]]; then
@@ -521,7 +521,7 @@ _mount_linked_packages() {
         # MCP token files — create if needed for bind mount, mount read-write for persistence
         for token_file in ".token-cache.json" ".selected-account.json"; do
             local token_path="$link_target/$token_file"
-            [[ ! -f "$token_path" ]] && touch "$token_path" 2>/dev/null
+            [[ ! -f "$token_path" ]] && : > "$token_path" 2>/dev/null
             if [[ -f "$token_path" ]]; then
                 _dbg "  Mounting token file read-write: $token_path"
                 bwrap_args+=(--bind "$token_path" "$token_path")
@@ -560,7 +560,7 @@ _bind_if_exists "$HOME/.claude.json" f bind
 # claudechic debug log (only needed if CLAUDECHIC_DEBUG is set)
 if [[ -n "${CLAUDECHIC_DEBUG:-}" ]]; then
     claudechic_log="$HOME/claudechic.log"
-    touch "$claudechic_log" 2>/dev/null
+    [[ -f "$claudechic_log" ]] || : > "$claudechic_log" 2>/dev/null
     _bind_if_exists "$claudechic_log" f bind
 fi
 
@@ -1108,7 +1108,7 @@ if [[ "$wsl_mode" == true ]]; then
     _dbg "WSL2 detected: applying workarounds"
 
     # Warn if workspace is on Windows filesystem (9P) - once per session
-    wsl_mnt_warned="/tmp/blaude-mnt-warned-${UID:-$_host_uid}"
+    wsl_mnt_warned="/tmp/blaude-mnt-warned-${_host_uid}"
     if [[ "$current_dir" == /mnt/* && ! -f "$wsl_mnt_warned" ]]; then
         echo "Warning: Workspace is on Windows filesystem (/mnt/*)." >&2
         echo "  WSL2's 9P protocol has known bugs causing spurious ENOENT errors." >&2
@@ -1117,7 +1117,7 @@ if [[ "$wsl_mode" == true ]]; then
         echo "" >&2
         read -n 1 -s -r -p "Press any key to continue..." >&2
         echo "" >&2
-        touch "$wsl_mnt_warned" 2>/dev/null || true
+        : > "$wsl_mnt_warned" 2>/dev/null || true
     fi
 
     sync
