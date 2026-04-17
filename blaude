@@ -547,10 +547,8 @@ _mount_host_bin "$HOME/go/bin" host-go-bin
 # DISABLE_AUTOUPDATER=1 is set below, so no write access needed
 _bind_if_exists "$HOME/.local/share/claude" d ro-bind
 
-# Ensure config directory exists on host and create mount point inside sandbox
-[[ -d "$config_dir" ]] || mkdir -p "$config_dir"
-bwrap_args+=(--dir "$config_dir")
-bwrap_args+=(--bind "$config_dir" "$config_dir")
+# Ensure config directory exists on host, then bind-mount (bwrap --bind auto-creates DEST)
+_ensure_and_bind "$config_dir" bind
 
 # Mount ~/.claude.json (OAuth session, MCP servers, preferences, caches)
 _bind_if_exists "$HOME/.claude.json" f bind

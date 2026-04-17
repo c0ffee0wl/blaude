@@ -113,7 +113,7 @@ class _OSC52Scanner:
                     i = j
                     continue
                 if chunk:
-                    buf.extend(data[i:j])
+                    buf.extend(memoryview(data)[i:j])
                 i = j
                 if i >= n:
                     self.state = state
