@@ -15,7 +15,6 @@ The sandbox provides:
 - Drops all Linux capabilities (`--cap-drop ALL`)
 - Uses separate namespaces (PID, IPC, UTS, user; plus optional network namespace with `--no-network`)
 - Sanitizes environment variables (`--clearenv` with an explicit passthrough allowlist; disable with `--keep-env`)
-- Optionally disables network access (`--no-network`)
 
 ## Installation
 
