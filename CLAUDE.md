@@ -19,8 +19,14 @@ blaude is a bash script that runs Claude Code inside a bubblewrap (bwrap) sandbo
 ./blaude -p "hello"              # Prompt mode
 ./blaude -m /path/to/dir         # Mount read-only
 ./blaude -m /path/to/dir:rw      # Mount read-write
+./blaude --git                   # Mount git config; pass GH_TOKEN/GITHUB_TOKEN
+./blaude --ssh                   # Mount SSH keys and forward agent
+./blaude --no-network            # Disable network namespace
+./blaude --tmp                   # Run isolated in /tmp (no workspace)
+./blaude --chic                  # Run claudechic TUI instead of claude
 ./blaude --keep-env              # Keep entire host environment
 ./blaude --clear-tmp             # Isolated tmpfs for /tmp
+./blaude fix-apparmor            # Install AppArmor profile (Ubuntu 24.04+)
 ```
 
 ## Key Architecture
@@ -38,7 +44,7 @@ The script builds a `bwrap` command with these isolation layers:
 - **Mandatory protected paths**: Inspired by [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime). Two strategies: (1) existing files → `--ro-bind` from host (preserves content, blocks writes); (2) existing directories → `--overlay-src + --tmp-overlay` (content readable, writes ephemeral, zero host artifacts). When a protected child dir doesn't exist but its parent does (e.g., `.git/hooks/` missing but `.git/` exists), the parent is overlaid instead — preventing child creation without host stubs. Root-level dotfiles (`.bashrc` etc.) are only protected if they exist (no overlayable parent; low risk since uncommon in project dirs). `.git/*` paths only protected when `.git` is a directory (not a file as in git worktrees). Protected files: `.bashrc`, `.bash_profile`, `.zshrc`, `.zprofile`, `.profile`, `.gitconfig`, `.gitmodules`, `.ripgreprc`, `.mcp.json`, `.git/config`. Protected directories: `.git/hooks/`, `.vscode/`, `.idea/`. `.claude/` is intentionally left writable so agents can modify skills, agents, and settings. Override with `--allow-protected-writes` (also bypasses `$HOME` workspace/mount rejection).
 - **Mount validation**: Mount targets (`-m`) are resolved via `readlink -f` — broken symlinks rejected, `$HOME` mounts blocked (unless `--allow-protected-writes`). Workspace rejected if it resolves to `$HOME` (unless `--allow-protected-writes`). Note: a workspace symlink scan is unnecessary because bwrap's mount namespace prevents symlinks from resolving to host paths not explicitly mounted.
 - **`exec` vs non-exec bwrap**: The default path calls `_blaude_cleanup` then `exec` (clean process tree, direct signal delivery). WSL2 needs post-bwrap `sync` and asciinema needs post-bwrap SIGCONT — both require blaude to stay alive, so they share a unified non-exec path with `_blaude_exit` trap function. The condition is `[[ "$wsl_mode" == true || -n "$_asciinema_pid" ]]`.
-- **Sandbox bypass commands**: `update`, `install`, `install-github-app` exec claude directly (need write access outside sandbox). Checked both as `$1` and after flag parsing (e.g., `./blaude --debug install`).
+- **Sandbox bypass commands**: `update`, `install`, `install-github-app` exec claude directly (need write access outside sandbox). Checked both as `$1` and after flag parsing (e.g., `./blaude --debug install`). `fix-apparmor` also bypasses the sandbox (writes to `/etc/apparmor.d/` via sudo).
 - **Auto-configures `~/.claude/.claude.json`** with `hasCompletedOnboarding` and `bypassPermissionsModeAccepted` flags. Uses `jq` if available for merging, otherwise overwrites. Updates both `$CLAUDE_CONFIG_DIR/.claude.json` and `~/.claude.json`.
 - **UID mapping**: Root users get mapped to UID 1000 inside sandbox; non-root keeps their UID. Required for `--dangerously-skip-permissions`.
 - **D-Bus/keytar disabled by default** — file-based token storage is more reliable in headless environments (WSL2, containers). Use `--keyring` only if GNOME Keyring is properly configured and unlocked.

@@ -4,16 +4,18 @@ Run [Claude Code](https://claude.ai/code) in a [bubblewrap](https://github.com/c
 
 ## Why?
 
-Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands. blaude automatically runs Claude with this flag inside a Linux sandbox, so you get full autonomous operation without (most of) the risk. 
+Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands. blaude automatically runs Claude with this flag inside a Linux sandbox, so you get full autonomous operation without (most of) the risk.
+
+> **What "most of" means**: bwrap is not a security boundary against kernel exploits, `/tmp` is shared with the host by default (use `--clear-tmp` for an isolated tmpfs), and MCP servers plus any directories you bind-mount still have host reach. Treat this as attack-surface reduction, not a zero-trust container.
 
 The sandbox provides:
 
-- Isolates filesystem access (project directory, config, and caches writable; system directories read-only)
-- Protects dangerous files from writes (git hooks, shell configs, IDE configs, Claude commands)
-- Drops all Linux capabilities
-- Uses separate namespaces (PID, IPC, UTS, user)
-- Sanitizes environment variables
-- Optionally disables network access
+- Isolates filesystem access (tmpfs `$HOME` with writable access to project dir, `~/.claude`, `~/.config`, and package caches; system directories read-only)
+- Protects dangerous files from writes (shell rc files, `.gitconfig`, `.git/hooks/`, `.git/config`, `.vscode/`, `.idea/`, `.mcp.json`, `.ripgreprc` — in the workspace only; override with `--allow-protected-writes`)
+- Drops all Linux capabilities (`--cap-drop ALL`)
+- Uses separate namespaces (PID, IPC, UTS, user; plus optional network namespace with `--no-network`)
+- Sanitizes environment variables (`--clearenv` with an explicit passthrough allowlist; disable with `--keep-env`)
+- Optionally disables network access (`--no-network`)
 
 ## Installation
 
@@ -105,8 +107,10 @@ blaude --exec bash
 | `-m, --mount PATH` | Mount directory (append `:rw` for read-write) |
 | `--git` | Mount git config and pass `GH_TOKEN`/`GITHUB_TOKEN` |
 | `--ssh` | Mount SSH keys and forward agent |
+| `--aws` | Mount `~/.aws` read-only (for Bedrock auth) |
 | `--no-network` | Disable network access |
 | `--keyring` | Enable GNOME Keyring access (for keytar) |
+| `--keep-env` | Keep the entire host environment instead of clearing it |
 | `--chic` | Run [claudechic](https://github.com/mrocklin/claudechic) TUI instead of claude |
 | `--tmp` | Run isolated in /tmp |
 | `--clear-tmp` | Use empty tmpfs for /tmp instead of mounting host's /tmp |
@@ -128,11 +132,17 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
 | `~/.config/` | read-write | User config (uv, fabric, google-chrome, etc.) |
-| `~/.notebooklm-mcp/` | read-write | notebooklm-mcp auth and Chrome profile |
-| `~/.claude-mem/` | read-write | Persistent memory across sessions |
-| `~/.bun/` | read-only | Bun runtime and packages (`~/.bun/bin` in PATH) |
-| `~/.local/bin`, `~/.local/share/claude` | read-only | Claude binary and data |
-| `~/.cache`, `~/go`, `~/.cargo`, `~/.npm` | ephemeral | Package manager caches (cleared on exit) |
+| `~/.notebooklm-mcp/`, `~/.notebooklm-mcp-cli/` | read-write | notebooklm-mcp auth and Chrome profile |
+| `~/.claude-mem/` | read-write | Persistent memory across sessions (auto-created if claude-mem plugin is installed) |
+| `~/arxiv-storage/` | read-write | Research paper management tools |
+| `~/.nvm/` | read-only | Node Version Manager (if installed; current node bin added to PATH) |
+| `~/.bun/` | read-only | Bun runtime and packages (`~/.bun/bin` in PATH; `install/cache` gets a tmpfs overlay) |
+| `~/.npm/` | read-write | npm cache bound from host if it exists, otherwise ephemeral scaffold |
+| `~/.local/share/claude`, `~/.local/share/pipx`, `~/.local/share/uv/{tools,python}` | read-only | Claude data and tool-manager venvs |
+| `~/.local/bin` → `/opt/host-bin` | read-only | Host user binaries re-mounted under `/opt/` and added to PATH (the `claude` binary is also bound at its original path) |
+| `~/.cargo/bin` → `/opt/host-cargo-bin`, `~/go/bin` → `/opt/host-go-bin` | read-only | Cargo/Go bins re-mounted under `/opt/` and added to PATH |
+| `~/.cache/uv` | read-write | uv cache bound from host if it exists |
+| `~/.cache`, `~/go`, `~/.cargo` | ephemeral | Scaffolded on a tmpfs `$HOME` — cleared on exit |
 
 ## MCP Server Token Storage
 
@@ -190,6 +200,8 @@ The directory stores `auth.json` (cookies/CSRF/session) and `chrome-profile/` fo
 
 All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars) are automatically passed through if set:
 
+> **Note on `*` below**: except for the three rows explicitly called out as glob patterns (**claude-mem**, **Webhooks**, **Webshare**), the `*` is a shorthand for a specific enumerated list — e.g. `AWS_*` means `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE` — not a wildcard. Variables not enumerated in blaude's `claude_env_vars` array won't pass through; use `--env KEY=VALUE` for those.
+
 | Category | Variables |
 |----------|-----------|
 | **Authentication** | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_BETAS`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_FOUNDRY_*`, `ANTHROPIC_BEDROCK_BASE_URL`, `ANTHROPIC_BEDROCK_MANTLE_BASE_URL`, `ANTHROPIC_VERTEX_BASE_URL`, `AWS_BEARER_TOKEN_BEDROCK`, `CLAUDE_CODE_OAUTH_*` |
@@ -227,7 +239,7 @@ Inspired by Anthropic's [sandbox-runtime](https://github.com/anthropic-experimen
 sandbox-runtime enforces this using ripgrep-based scanning with `/dev/null` overlays and symlink neutralization. blaude uses a similar technique adapted for its bash/bwrap architecture, with zero host filesystem artifacts:
 
 - **Existing files**: `--ro-bind` from host (preserves content, blocks writes)
-- **Existing directories**: `--tmp-overlay` (content readable, writes succeed but are ephemeral — never reach host)
+- **Existing directories**: `--tmp-overlay` (content readable, writes succeed but are ephemeral — never reach host). Requires bwrap ≥ 0.8.0; older bwrap falls back to `--ro-bind`, which still blocks writes but may create host stubs for non-existent targets.
 - **Non-existent directories**: parent directory is overlaid instead (e.g., if `.git/hooks/` is missing, `.git/` is overlaid to prevent hooks creation)
 - **Root-level dotfiles** (`.bashrc` etc.): only protected if they exist (no parent to overlay; low risk since uncommon in project directories)
 - **Git worktrees**: `.git/*` paths are only protected when `.git` is a directory (not a file, as in worktrees)
@@ -261,7 +273,7 @@ blaude --allow-protected-writes
 
 VTE-based terminals (Terminator, GNOME Terminal, XFCE Terminal) don't support OSC 52 clipboard sequences. Claude Code uses OSC 52 for clipboard operations, so copying silently fails on these terminals.
 
-blaude ships `osc52-clipboard`, a companion script that intercepts OSC 52 sequences and copies to the system clipboard via `xclip`, `xsel`, or `wl-copy`. It activates automatically when `osc52-clipboard` is found (same directory as blaude, or on PATH). Disable with `--no-clipboard`.
+blaude ships `osc52-clipboard`, a companion script that intercepts OSC 52 sequences and copies to the system clipboard via `xclip`, `xsel`, or `wl-copy`. It activates automatically when `osc52-clipboard` is found (same directory as blaude, or on PATH). Disable with `--no-clipboard` or `OSC52_NO_CLIPBOARD=1`.
 
 Requires one of: `xclip`, `xsel` (X11), or `wl-copy` (Wayland).
 
