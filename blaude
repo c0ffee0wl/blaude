@@ -944,19 +944,26 @@ fi
 # never accepted from host env (the passthrough loop below explicitly removes
 # them from the whitelist, so they can't drift if added to claude_env_vars
 # by accident). CLAUDE_DISABLE_CONFIG_WATCH prevents inotify ENOSPC crashes.
-# CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0 is required because =1 triggers
-# permission-mode hardening that overrides the --dangerously-skip-permissions
-# flag blaude always passes to claude (and to claudechic via --chic).
 _hardcoded_env_vars=(
     DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_AUTOUPDATER=1 DISABLE_ERROR_REPORTING=1
     DISABLE_BUG_COMMAND=1 CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
     DISABLE_INSTALL_GITHUB_APP_COMMAND=1 CLAUDE_DISABLE_CONFIG_WATCH=1
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0
 )
 for _kv in "${_hardcoded_env_vars[@]}"; do
     bwrap_args+=(--setenv "${_kv%%=*}" "${_kv#*=}")
 done
 unset _kv
+
+# Hardcoded env-var unsets — forced absent regardless of host env.
+# CLAUDE_CODE_SUBPROCESS_ENV_SCRUB triggers permission-mode hardening
+# whenever defined (even =0), overriding --dangerously-skip-permissions.
+_hardcoded_unsetenv_vars=(
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+)
+for _var in "${_hardcoded_unsetenv_vars[@]}"; do
+    bwrap_args+=(--unsetenv "$_var")
+done
+unset _var
 
 # Auto-passthrough Claude Code environment variables from host
 # Reference: https://code.claude.com/docs/en/settings
@@ -1000,7 +1007,7 @@ claude_env_vars=(
     BASH_DEFAULT_TIMEOUT_MS BASH_MAX_OUTPUT_LENGTH BASH_MAX_TIMEOUT_MS
     CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR CLAUDE_CODE_BASH_MAINTAIN_PROJECT_WORKING_DIR
     CLAUDE_CODE_SHELL CLAUDE_CODE_SHELL_PREFIX
-    # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is force-set to 0 in _hardcoded_env_vars.
+    # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is force-unset via _hardcoded_unsetenv_vars.
     CLAUDE_CODE_SCRIPT_CAPS CLAUDE_CODE_PERFORCE_MODE
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS CLAUDE_BASH_NO_LOGIN
     CLAUDE_CODE_GLOB_HIDDEN CLAUDE_CODE_GLOB_NO_IGNORE CLAUDE_CODE_GLOB_TIMEOUT_SECONDS
@@ -1118,10 +1125,12 @@ claude_env_vars=(
 if [[ "$keep_env_mode" != true ]]; then
     declare -A _env_whitelist
     for var in "${claude_env_vars[@]}"; do _env_whitelist[$var]=1; done
-    # Remove hardcoded vars from the whitelist — they're forced above and
-    # must never be overridden from the host env, even if accidentally added
-    # to claude_env_vars. Strip the =VALUE suffix to get the var name.
-    for _kv in "${_hardcoded_env_vars[@]}"; do unset "_env_whitelist[${_kv%%=*}]"; done
+    # Remove hardcoded vars from the whitelist — they're forced (set or
+    # unset) above and must never be overridden from the host env. %%=* is
+    # a no-op on the bare-name entries from _hardcoded_unsetenv_vars.
+    for _kv in "${_hardcoded_env_vars[@]}" "${_hardcoded_unsetenv_vars[@]}"; do
+        unset "_env_whitelist[${_kv%%=*}]"
+    done
     unset _kv
 
     while IFS= read -r name; do
