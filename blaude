@@ -326,6 +326,36 @@ _reject_if_home() {
     exit 1
 }
 
+# Warn about symlinks inside <root> whose targets escape it. bwrap mounts
+# don't follow these, but if the target happens to be writable via another
+# mount (e.g. -m ~/secrets:rw), Claude could traverse the link unexpectedly.
+# Skips in-tree targets and known-safe system paths.
+# Pruned dirs (node_modules etc.) keep cold-cache scan sub-second on monorepos.
+_scan_workspace_symlinks() {
+    local root="$1" link target rel header_shown=false
+    while IFS= read -r -d '' link; do
+        # -m resolves the path even if the target is missing — broken symlinks
+        # are still a smell (target may appear later via mount/race).
+        target=$(readlink -m "$link" 2>/dev/null) || continue
+        [[ -z "$target" ]] && continue
+        case "$target" in
+            "$root"|"$root"/*) continue ;;
+            /usr/*|/lib/*|/lib32/*|/lib64/*|/bin/*|/sbin/*) continue ;;
+            /etc/*|/proc/*|/sys/*|/dev/*) continue ;;
+        esac
+        if [[ "$header_shown" == false ]]; then
+            echo "Warning: workspace contains symlinks pointing outside the tree:" >&2
+            header_shown=true
+        fi
+        rel="${link#"$root"/}"
+        printf '  %s -> %s\n' "$rel" "$target" >&2
+    done < <(find "$root" -maxdepth 4 \
+                 \( -name node_modules -o -name .git -o -name target \
+                    -o -name dist -o -name build -o -name .venv \
+                    -o -name vendor -o -name __pycache__ \) -prune \
+                 -o -type l -print0 2>/dev/null)
+}
+
 # System mounts (read-only)
 bwrap_args+=(--ro-bind /usr /usr)
 _bind_if_exists /lib d ro-bind
@@ -380,7 +410,10 @@ fi
 bwrap_args+=(
     --tmpfs /var
     --tmpfs /run
-    --dir "/run/user/$sandbox_uid"
+    # tmpfs (not --dir) so accidental host re-binds under /run/user/ get blocked.
+    # Wayland/PipeWire/D-Bus sockets only appear via explicit later --bind.
+    # XDG_RUNTIME_DIR is set after --clearenv (search for it below).
+    --tmpfs "/run/user/$sandbox_uid"
 )
 
 # D-Bus session bus access (optional, for keytar/GNOME Keyring/Secret Service)
@@ -616,10 +649,18 @@ _bind_env_path() { _bind_if_exists "${!1:-}" "$2" "$3"; }
 # Add --setenv VAR=<host value> to bwrap_args iff VAR is set and non-empty.
 _setenv_if_set() { [[ -n "${!1:-}" ]] && bwrap_args+=(--setenv "$1" "${!1}"); }
 
-# Git mode: mount git configuration files and pass GitHub tokens
+# Git mode: mount git config, GPG agent socket dir, and pass GitHub tokens
 if [[ "$git_mode" == true ]]; then
     _bind_if_exists "$HOME/.gitconfig" f ro-bind
     _bind_if_exists "$HOME/.git-credentials" f ro-bind
+    # GPG agent socket (for signed commits with commit.gpgsign=true).
+    # gpgconf is the canonical way to discover the socket dir — handles
+    # XDG_RUNTIME_DIR/gnupg vs ~/.gnupg vs custom GNUPGHOME transparently.
+    if command -v gpgconf &>/dev/null; then
+        _bind_if_exists "$(gpgconf --list-dirs socketdir 2>/dev/null)" d bind
+    fi
+    # GNUPGHOME may point to a non-default keyring location — mount read-only.
+    _bind_env_path GNUPGHOME d ro-bind
     # GitHub tokens (for gh CLI, git push/pull, MCP servers)
     for var in GH_TOKEN GITHUB_TOKEN; do
         _setenv_if_set "$var"
@@ -629,8 +670,10 @@ fi
 # SSH mode: mount SSH keys and forward SSH agent
 if [[ "$ssh_mode" == true ]]; then
     _bind_if_exists "$HOME/.ssh" d ro-bind
+    # Bind the socket's parent dir so socket re-creation by systemd-tmpfile
+    # (e.g. after `systemctl --user restart ssh-agent`) stays visible.
     [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]] && \
-        bwrap_args+=(--bind "$SSH_AUTH_SOCK" "$SSH_AUTH_SOCK")
+        _bind_if_exists "${SSH_AUTH_SOCK%/*}" d bind
 fi
 
 # AWS mode: mount AWS config/credentials for Bedrock authentication
@@ -709,6 +752,7 @@ else
     fi
 
     workspace="/workspaces/$safe_dir_name"
+    [[ "$allow_protected_writes" != true ]] && _scan_workspace_symlinks "$current_dir"
     bwrap_args+=(--bind "$current_dir" "$workspace")
     bwrap_args+=(--chdir "$workspace")
 
@@ -760,6 +804,53 @@ else
 
         [[ -d "$current_dir/.vscode" ]] && _protect_dir "$current_dir/.vscode" "$workspace/.vscode"
         [[ -d "$current_dir/.idea" ]]   && _protect_dir "$current_dir/.idea" "$workspace/.idea"
+
+        # Same protection for nested protected paths (monorepos, git submodules,
+        # vendored deps). mindepth 2 skips the top-level (already done above).
+        # maxdepth 3 catches submodules and one level of vendored deps without
+        # exploding scan time on monorepos. Noise dirs (node_modules etc.) are
+        # pruned first; then matches are pruned-and-printed so we don't descend.
+        _apply_nested_protected() {
+            local found rel
+            while IFS= read -r found; do
+                rel="${found#"$current_dir"/}"
+                case "${found##*/}" in
+                    .git)
+                        if [[ -d "$found/hooks" ]]; then
+                            [[ -f "$found/config" ]] && _protect_file "$found/config" "$workspace/$rel/config"
+                            _protect_dir "$found/hooks" "$workspace/$rel/hooks"
+                        else
+                            _protect_dir "$found" "$workspace/$rel"
+                        fi
+                        ;;
+                    .vscode|.idea)
+                        _protect_dir "$found" "$workspace/$rel"
+                        ;;
+                    *)
+                        _protect_file "$found" "$workspace/$rel"
+                        ;;
+                esac
+            done < <(
+                find "$current_dir" -mindepth 2 -maxdepth 3 \
+                    \( -name node_modules -o -name target -o -name dist \
+                       -o -name build -o -name .venv -o -name vendor \
+                       -o -name __pycache__ \) -prune \
+                    -o \
+                    \( -type d \( -name .git -o -name .vscode -o -name .idea \) -prune -print \) \
+                    2>/dev/null
+                find "$current_dir" -mindepth 2 -maxdepth 3 \
+                    \( -name node_modules -o -name target -o -name dist \
+                       -o -name build -o -name .venv -o -name vendor \
+                       -o -name __pycache__ -o -name .git \) -prune \
+                    -o \
+                    \( -type f \( -name .bashrc -o -name .bash_profile \
+                                  -o -name .zshrc -o -name .zprofile -o -name .profile \
+                                  -o -name .gitconfig -o -name .gitmodules \
+                                  -o -name .ripgreprc -o -name .mcp.json \) -print \) \
+                    2>/dev/null
+            )
+        }
+        _apply_nested_protected
     fi
 fi
 
@@ -770,9 +861,10 @@ if [[ "$keep_env_mode" != true ]]; then
     bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
     _setenv_if_set COLORTERM
 fi
-# PATH, GOPATH, CARGO_HOME, NVM_DIR/NPM_CONFIG_PREFIX below are set unconditionally —
-# even under --keep-env — because they must point at sandbox-mounted paths
-# (e.g. /opt/host-bin) rather than the host's originals.
+# XDG_RUNTIME_DIR, PATH, GOPATH, CARGO_HOME, NVM_DIR/NPM_CONFIG_PREFIX below are set
+# unconditionally — even under --keep-env — because they must point at sandbox-mounted
+# paths (e.g. /opt/host-bin, /run/user/$sandbox_uid) rather than the host's originals.
+bwrap_args+=(--setenv XDG_RUNTIME_DIR "/run/user/$sandbox_uid")
 sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:/opt/host-bin:/opt/host-cargo-bin:/opt/host-go-bin"
 # Add NVM bin directory if NVM is installed (for npx, node, npm)
 if [[ -n "${NVM_BIN:-}" ]]; then
@@ -896,6 +988,8 @@ claude_env_vars=(
     AWS_PROFILE AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE
     # Google Cloud Credentials (for Vertex AI)
     GCLOUD_PROJECT GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS
+    # GPG (for signed commits — agent socket bound separately under --git)
+    GPG_TTY GNUPGHOME
     # MCP Configuration
     MCP_TIMEOUT MCP_TOOL_TIMEOUT MCP_OAUTH_CALLBACK_PORT MCP_CLIENT_SECRET ENABLE_TOOL_SEARCH
     ENABLE_CLAUDEAI_MCP_SERVERS MCP_CONNECTION_NONBLOCKING

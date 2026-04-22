@@ -104,8 +104,8 @@ blaude --exec bash
 |--------|-------------|
 | `--env KEY=VALUE` | Set environment variable in sandbox |
 | `-m, --mount PATH` | Mount directory (append `:rw` for read-write) |
-| `--git` | Mount git config and pass `GH_TOKEN`/`GITHUB_TOKEN` |
-| `--ssh` | Mount SSH keys and forward agent |
+| `--git` | Mount git config, GPG agent socket (for signed commits), and pass `GH_TOKEN`/`GITHUB_TOKEN` |
+| `--ssh` | Mount SSH keys and forward agent (binds the socket's parent dir for systemd-tmpfile rotation) |
 | `--aws` | Mount `~/.aws` read-only (for Bedrock auth) |
 | `--no-network` | Disable network access |
 | `--keyring` | Enable GNOME Keyring access (for keytar) |
@@ -127,6 +127,7 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | Path | Access | Purpose |
 |------|--------|---------|
 | `/usr`, `/lib*`, `/bin`, `/etc` | read-only | System binaries and libraries |
+| `/run/user/<uid>` | tmpfs | Empty XDG runtime dir; `XDG_RUNTIME_DIR` set accordingly. Wayland/PipeWire/D-Bus sockets only appear via opt-in (`--keyring` for D-Bus). |
 | `/tmp` | read-write | Host's /tmp (use `--clear-tmp` for isolated tmpfs) |
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
@@ -221,6 +222,7 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 | **Features** | `CLAUDE_CODE_SIMPLE`, `CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT`, `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS`, `CLAUDE_CODE_DISABLE_CRON`, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`, `CLAUDE_CODE_ENABLE_TASKS`, `CLAUDE_CODE_PLAN_MODE_REQUIRED`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_DISABLE_ATTACHMENTS`, `CLAUDE_CODE_DISABLE_CLAUDE_MDS`, `CLAUDE_CODE_ENABLE_AWAY_SUMMARY`, `CLAUDE_CODE_ENABLE_BACKGROUND_PLUGIN_REFRESH`, `CLAUDE_CODE_USE_POWERSHELL_TOOL`, `CLAUDE_CODE_FORK_SUBAGENT`, `CLAUDE_AUTO_BACKGROUND_TASKS`, `CLAUDE_AGENT_SDK_*`, `CLAUDE_REMOTE_CONTROL_SESSION_NAME_PREFIX` |
 | **Advanced** | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, `CLAUDE_CODE_EXTRA_BODY`, `DISABLE_PROMPT_CACHING*`, `SLASH_COMMAND_TOOL_CHAR_BUDGET`, `CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD`, `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`, `CLAUDE_ENABLE_BYTE_WATCHDOG`, `DISABLE_AUTO_COMPACT`, `DISABLE_INTERLEAVED_THINKING`, `ENABLE_PROMPT_CACHING_1H`, `ENABLE_PROMPT_CACHING_1H_BEDROCK`, `FORCE_PROMPT_CACHING_5M` |
 | **GitHub** (requires `--git`) | `GH_TOKEN`, `GITHUB_TOKEN` |
+| **GPG** (socket bound under `--git`) | `GPG_TTY`, `GNUPGHOME` |
 | **Other LLM APIs** | `OPENAI_API_KEY`, `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `JINA_API_KEY`, `EXA_API_KEY`, `GROQ_API_KEY`, `HF_TOKEN`, etc. |
 | **Third-party Services** | `FEEDLY_ACCESS_TOKEN`, `RAINDROP_ACCESS_TOKEN` |
 | **claudechic** | `CLAUDECHIC_DEBUG`, `CLAUDECHIC_REMOTE_PORT`, `CHIC_PROFILE`, `CHIC_SAMPLE_THRESHOLD` |
@@ -242,6 +244,8 @@ sandbox-runtime enforces this using ripgrep-based scanning with `/dev/null` over
 - **Non-existent directories**: parent directory is overlaid instead (e.g., if `.git/hooks/` is missing, `.git/` is overlaid to prevent hooks creation)
 - **Root-level dotfiles** (`.bashrc` etc.): only protected if they exist (no parent to overlay; low risk since uncommon in project directories)
 - **Git worktrees**: `.git/*` paths are only protected when `.git` is a directory (not a file, as in worktrees)
+- **Nested paths** (monorepos, git submodules, vendored deps): the same protection is applied to matches found by a `find` scan up to depth 3 (e.g. `packages/app/.git/hooks/`, `packages/lib/.bashrc`)
+- **Workspace symlinks**: a pre-flight scan (`find -maxdepth 4 -type l`) warns about symlinks pointing outside the workspace tree and outside known-safe system paths (`/usr`, `/lib*`, `/bin`, `/sbin`, `/etc`, `/proc`, `/sys`, `/dev`). bwrap mounts don't follow these, but combined with `-m ...:rw` they could expose unintended host paths.
 
 ### Protected files
 
