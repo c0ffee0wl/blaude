@@ -6,10 +6,12 @@
 set -euo pipefail
 BLAUDE="${1:-blaude}"
 
-echo "=== HARDCODED (Claude Code config block) ==="
-# Only extract from the "Claude Code configuration" bwrap_args block
-sed -n '/# Claude Code configuration/,/^)/p' "$BLAUDE" \
-  | grep -oP '(?<=--setenv )\S+' \
+echo "=== HARDCODED (forced via _hardcoded_env_vars KEY=VALUE pairs) ==="
+# Stored as KEY=VALUE pairs since the SCRUB=0 fix; extract the KEY part only.
+sed -n '/^_hardcoded_env_vars=(/,/^)/p' "$BLAUDE" \
+  | grep -v '^\s*#' \
+  | grep -oE '[A-Z_][A-Z0-9_]*=' \
+  | tr -d '=' \
   | sort -u
 
 echo ""

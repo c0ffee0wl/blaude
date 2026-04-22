@@ -41,8 +41,8 @@ Look for:
 ### 5. Security-relevant changes
 
 Look for:
-- Credential scrubbing (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`)
-- Permission hardening
+- Credential scrubbing (`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` — already force-set to `0` in `_hardcoded_env_vars` because `=1` blocks `--dangerously-skip-permissions`)
+- Permission hardening — any new env var or settings.json key that downgrades/blocks bypass mode (extend `_hardcoded_env_vars` or `_warn_if_bypass_disabled`)
 - Sandbox-related fixes
 - New authentication flows
 

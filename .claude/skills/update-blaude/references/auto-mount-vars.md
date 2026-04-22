@@ -14,8 +14,10 @@ Some env vars point to files or directories that must be bind-mounted into the s
 | `CLAUDE_CODE_CLIENT_KEY` | `--ro-bind` (read-only) | File exists on host |
 | `AWS_WEB_IDENTITY_TOKEN_FILE` | `--ro-bind` (read-only) | File exists on host |
 | `NODE_EXTRA_CA_CERTS` | `--ro-bind` (read-only) | File exists on host |
-| `SSH_AUTH_SOCK` | `--bind` (read-write) | Socket exists, `--git` flag |
-| `GOOGLE_APPLICATION_CREDENTIALS` | `--ro-bind` (read-only) | File exists, `--aws` flag |
+| `SSH_AUTH_SOCK` | `--bind` (read-write) on parent dir | Socket exists, `--ssh` flag (parent dir is bound so the socket survives systemd-tmpfile rotation) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | `--ro-bind` (read-only) | File exists |
+| `GNUPGHOME` | `--ro-bind` (read-only) | Directory exists, `--git` flag (custom GPG keyring location) |
+| `gpgconf --list-dirs socketdir` | `--bind` (read-write) | Directory exists, `--git` flag (GPG agent socket; not an env var, discovered dynamically) |
 
 ## How to identify new vars that need mounting
 

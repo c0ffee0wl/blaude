@@ -6,7 +6,7 @@ The `claude_env_vars` array (~line 694) uses comment headers to organize vars. W
 |---|---|
 | `# Authentication & API Configuration` | `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` |
 | `# Model Configuration` | `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL*`, `VERTEX_REGION_*` |
-| `# Bash & Command Execution` | `BASH_*`, `CLAUDE_CODE_SHELL*`, `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` |
+| `# Bash & Command Execution` | `BASH_*`, `CLAUDE_CODE_SHELL*`, `CLAUDE_CODE_SCRIPT_CAPS` (note: `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` is force-set to `0` in `_hardcoded_env_vars`, NOT in passthrough) |
 | `# Token & Output Limits` | `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, `MAX_MCP_OUTPUT_TOKENS` |
 | `# Cloud Provider Configuration` | `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_SKIP_*_AUTH` |
 | `# AWS Credentials (for Bedrock)` | `AWS_ACCESS_KEY_ID`, `AWS_PROFILE`, `AWS_REGION` |

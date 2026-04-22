@@ -271,6 +271,32 @@ merge_config_flags "$config_dir/.claude.json"
 [[ "$config_dir/.claude.json" != "$HOME/.claude.json" ]] && \
     merge_config_flags "$HOME/.claude.json"
 
+# Warn if any settings file disables bypass-permissions mode — blaude always
+# passes --dangerously-skip-permissions, so this would silently downgrade to
+# default mode. We can't override managed-settings.json (enterprise-controlled).
+# Warn if any settings file disables bypass-permissions mode — blaude always
+# passes --dangerously-skip-permissions, so this would silently downgrade to
+# default mode. Same dedup pattern as merge_config_flags above.
+# No 2>/dev/null on $(< file): that breaks the bash file-read optimization and
+# silently returns empty. Existence + readability check is sufficient.
+_disable_re='"disableBypassPermissionsMode"[[:space:]]*:[[:space:]]*"disable"'
+_settings_files=("$config_dir/settings.json" /etc/claude-code/managed-settings.json)
+[[ "$config_dir/settings.json" != "$HOME/.claude/settings.json" ]] && \
+    _settings_files+=("$HOME/.claude/settings.json")
+for _settings_file in "${_settings_files[@]}"; do
+    [[ -f "$_settings_file" && -r "$_settings_file" ]] || continue
+    [[ "$(< "$_settings_file")" =~ $_disable_re ]] || continue
+    echo "Warning: $_settings_file sets permissions.disableBypassPermissionsMode=\"disable\"." >&2
+    echo "  This blocks --dangerously-skip-permissions which blaude always passes." >&2
+    if [[ "$_settings_file" == /etc/claude-code/managed-settings.json ]]; then
+        echo "  This is an enterprise-managed setting and can only be changed by your admin." >&2
+    else
+        echo "  Remove the key to restore bypass mode." >&2
+    fi
+    break  # one warning is enough
+done
+unset _disable_re _settings_files _settings_file
+
 # --- Build bwrap command ---
 
 bwrap_args=(
@@ -914,19 +940,23 @@ if [[ "$keep_env_mode" != true ]]; then
     fi
 fi
 
-# Hardcoded to "1" unconditionally — these must never be accepted from the
-# host environment (the passthrough loop below explicitly removes them from
-# the whitelist, so they can't drift if added to claude_env_vars by accident).
-# CLAUDE_DISABLE_CONFIG_WATCH prevents inotify ENOSPC crashes in sandbox.
+# Hardcoded env-var overrides — KEY=VALUE pairs forced into the sandbox,
+# never accepted from host env (the passthrough loop below explicitly removes
+# them from the whitelist, so they can't drift if added to claude_env_vars
+# by accident). CLAUDE_DISABLE_CONFIG_WATCH prevents inotify ENOSPC crashes.
+# CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0 is required because =1 triggers
+# permission-mode hardening that overrides the --dangerously-skip-permissions
+# flag blaude always passes to claude (and to claudechic via --chic).
 _hardcoded_env_vars=(
-    DO_NOT_TRACK DISABLE_TELEMETRY DISABLE_AUTOUPDATER DISABLE_ERROR_REPORTING
-    DISABLE_BUG_COMMAND CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY
-    DISABLE_INSTALL_GITHUB_APP_COMMAND CLAUDE_DISABLE_CONFIG_WATCH
+    DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_AUTOUPDATER=1 DISABLE_ERROR_REPORTING=1
+    DISABLE_BUG_COMMAND=1 CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
+    DISABLE_INSTALL_GITHUB_APP_COMMAND=1 CLAUDE_DISABLE_CONFIG_WATCH=1
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0
 )
-for _v in "${_hardcoded_env_vars[@]}"; do
-    bwrap_args+=(--setenv "$_v" 1)
+for _kv in "${_hardcoded_env_vars[@]}"; do
+    bwrap_args+=(--setenv "${_kv%%=*}" "${_kv#*=}")
 done
-unset _v
+unset _kv
 
 # Auto-passthrough Claude Code environment variables from host
 # Reference: https://code.claude.com/docs/en/settings
@@ -969,7 +999,8 @@ claude_env_vars=(
     # Bash & Command Execution
     BASH_DEFAULT_TIMEOUT_MS BASH_MAX_OUTPUT_LENGTH BASH_MAX_TIMEOUT_MS
     CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR CLAUDE_CODE_BASH_MAINTAIN_PROJECT_WORKING_DIR
-    CLAUDE_CODE_SHELL CLAUDE_CODE_SHELL_PREFIX CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
+    CLAUDE_CODE_SHELL CLAUDE_CODE_SHELL_PREFIX
+    # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is force-set to 0 in _hardcoded_env_vars.
     CLAUDE_CODE_SCRIPT_CAPS CLAUDE_CODE_PERFORCE_MODE
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS CLAUDE_BASH_NO_LOGIN
     CLAUDE_CODE_GLOB_HIDDEN CLAUDE_CODE_GLOB_NO_IGNORE CLAUDE_CODE_GLOB_TIMEOUT_SECONDS
@@ -1087,10 +1118,11 @@ claude_env_vars=(
 if [[ "$keep_env_mode" != true ]]; then
     declare -A _env_whitelist
     for var in "${claude_env_vars[@]}"; do _env_whitelist[$var]=1; done
-    # Remove hardcoded vars from the whitelist — they're set to "1" above and
+    # Remove hardcoded vars from the whitelist — they're forced above and
     # must never be overridden from the host env, even if accidentally added
-    # to claude_env_vars.
-    for var in "${_hardcoded_env_vars[@]}"; do unset "_env_whitelist[$var]"; done
+    # to claude_env_vars. Strip the =VALUE suffix to get the var name.
+    for _kv in "${_hardcoded_env_vars[@]}"; do unset "_env_whitelist[${_kv%%=*}]"; done
+    unset _kv
 
     while IFS= read -r name; do
         if [[ -n "${_env_whitelist[$name]:-}" || \
