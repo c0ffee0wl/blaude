@@ -16,7 +16,9 @@ if ! command -v claude &>/dev/null; then
     echo "Install from: https://docs.anthropic.com/en/docs/claude-code" >&2
     exit 1
 fi
-# Commands that must run outside the sandbox (need write access to system paths)
+# Commands that must run outside the sandbox (need write access to system paths).
+# DISABLE_UPDATES (Claude Code 2.1.118+) is enforced by claude itself via the
+# inherited host env — no host-side guard needed; claude prints its own message.
 if [[ "${1:-}" =~ ^(update|install|install-github-app)$ ]]; then
     exec claude "$@"
 fi
@@ -274,28 +276,31 @@ merge_config_flags "$config_dir/.claude.json"
 # Warn if any settings file disables bypass-permissions mode — blaude always
 # passes --dangerously-skip-permissions, so this would silently downgrade to
 # default mode. We can't override managed-settings.json (enterprise-controlled).
-# Warn if any settings file disables bypass-permissions mode — blaude always
-# passes --dangerously-skip-permissions, so this would silently downgrade to
-# default mode. Same dedup pattern as merge_config_flags above.
 # No 2>/dev/null on $(< file): that breaks the bash file-read optimization and
 # silently returns empty. Existence + readability check is sufficient.
 _disable_re='"disableBypassPermissionsMode"[[:space:]]*:[[:space:]]*"disable"'
 _settings_files=("$config_dir/settings.json" /etc/claude-code/managed-settings.json)
 [[ "$config_dir/settings.json" != "$HOME/.claude/settings.json" ]] && \
     _settings_files+=("$HOME/.claude/settings.json")
+# managed-settings.d/ drop-in directory (Claude Code 2.1.83+); fragments merge alphabetically.
+if [[ -d /etc/claude-code/managed-settings.d ]]; then
+    for _f in /etc/claude-code/managed-settings.d/*.json; do
+        [[ -f "$_f" ]] && _settings_files+=("$_f")
+    done
+fi
 for _settings_file in "${_settings_files[@]}"; do
     [[ -f "$_settings_file" && -r "$_settings_file" ]] || continue
     [[ "$(< "$_settings_file")" =~ $_disable_re ]] || continue
     echo "Warning: $_settings_file sets permissions.disableBypassPermissionsMode=\"disable\"." >&2
     echo "  This blocks --dangerously-skip-permissions which blaude always passes." >&2
-    if [[ "$_settings_file" == /etc/claude-code/managed-settings.json ]]; then
+    if [[ "$_settings_file" == /etc/claude-code/* ]]; then
         echo "  This is an enterprise-managed setting and can only be changed by your admin." >&2
     else
         echo "  Remove the key to restore bypass mode." >&2
     fi
     break  # one warning is enough
 done
-unset _disable_re _settings_files _settings_file
+unset _disable_re _settings_files _settings_file _f
 
 # --- Build bwrap command ---
 
@@ -1049,7 +1054,7 @@ claude_env_vars=(
     OTEL_RESOURCE_ATTRIBUTES OTEL_LOG_RAW_API_BODIES
     DISABLE_COST_WARNINGS
     # UI & Display
-    CLAUDE_CODE_HIDE_ACCOUNT_INFO CLAUDE_CODE_DISABLE_TERMINAL_TITLE IS_DEMO
+    CLAUDE_CODE_HIDE_ACCOUNT_INFO CLAUDE_CODE_HIDE_CWD CLAUDE_CODE_DISABLE_TERMINAL_TITLE IS_DEMO
     CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_NO_FLICKER CLAUDE_CODE_SCROLL_SPEED FORCE_HYPERLINK
     CLAUDE_CODE_ACCESSIBILITY CLAUDE_CODE_SYNTAX_HIGHLIGHT
     CLAUDE_CODE_DISABLE_VIRTUAL_SCROLL CLAUDE_CODE_TMUX_TRUECOLOR CLAUDE_CODE_SKIP_PROMPT_HISTORY
@@ -1074,7 +1079,7 @@ claude_env_vars=(
     CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL
     CLAUDE_CODE_SYNC_PLUGIN_INSTALL CLAUDE_CODE_SYNC_PLUGIN_INSTALL_TIMEOUT_MS
     DISABLE_UPGRADE_COMMAND DISABLE_DOCTOR_COMMAND DISABLE_EXTRA_USAGE_COMMAND
-    DISABLE_LOGIN_COMMAND DISABLE_LOGOUT_COMMAND
+    DISABLE_LOGIN_COMMAND DISABLE_LOGOUT_COMMAND DISABLE_UPDATES
     # Memory
     CLAUDE_CODE_DISABLE_AUTO_MEMORY
     # Features & Functionality
