@@ -582,10 +582,27 @@ _mount_linked_packages() {
         printf '%s\n' "${link_targets[@]}" > "$cache_file" 2>/dev/null || true
     fi
 
+    # When a package root sits inside a node_modules/ directory (bun's flat
+    # global layout, scoped or unscoped), mount the whole node_modules so
+    # transitive sibling deps resolve. Otherwise mount the package alone.
+    local -A mount_seen=()
     for link_target in "${link_targets[@]}"; do
-        _dbg "Auto-mounting ${label}-linked package: $link_target"
-        bwrap_args+=(--ro-bind "$link_target" "$link_target")
-        # MCP token files — create if needed for bind mount, mount read-write for persistence
+        local parent="${link_target%/*}"
+        local parent_name="${parent##*/}"
+        local mount_root="$link_target"
+        if [[ "$parent_name" == "node_modules" ]]; then
+            mount_root="$parent"
+        elif [[ "$parent_name" == @* ]]; then
+            local grandparent="${parent%/*}"
+            [[ "${grandparent##*/}" == "node_modules" ]] && mount_root="$grandparent"
+        fi
+        if [[ "$mount_root" != "$HOME" && -z "${mount_seen[$mount_root]:-}" ]]; then
+            mount_seen[$mount_root]=1
+            _dbg "Auto-mounting ${label}-linked: $mount_root"
+            _bind_if_exists "$mount_root" d ro-bind
+        fi
+        # MCP token files — create if needed for bind mount, mount read-write for persistence.
+        # Added after the parent ro-bind so bwrap's later-overrides-earlier rule keeps them writable.
         for token_file in ".token-cache.json" ".selected-account.json"; do
             local token_path="$link_target/$token_file"
             [[ ! -f "$token_path" ]] && : > "$token_path" 2>/dev/null
