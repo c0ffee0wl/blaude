@@ -319,4 +319,4 @@ You only need to run this once. The fix is idempotent — running it again is a 
 
 ## License
 
-GPL-3.0
+Apache-2.0 — see [LICENSE](LICENSE).
