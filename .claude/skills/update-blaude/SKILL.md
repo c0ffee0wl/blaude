@@ -54,14 +54,23 @@ Fetch https://code.claude.com/docs/en/settings for managed settings overlap, but
 
 ### 3. Diff and classify
 
+blaude auto-passes any host env var matching `ANTHROPIC_*` or `CLAUDE_*` via prefix match in the passthrough loop. The `claude_env_vars` array only covers non-prefix vars (third-party LLM keys, cloud auth, OTEL/MCP standards, `VERTEX_REGION_CLAUDE_*`, and bare names like `CLAUDECODE`, `AI_AGENT`, `DEBUG`, etc.).
+
 For each official var, classify as one of:
 
 | Classification | Action |
 |---|---|
-| Already in passthrough | No action |
+| Matches `ANTHROPIC_*` or `CLAUDE_*` prefix | No action — auto-passed |
+| Already in `claude_env_vars` (non-prefix) | No action |
 | Already hardcoded | No action (see [hardcoded-vars.md](references/hardcoded-vars.md)) |
-| Missing from blaude | Recommend adding — assign to correct category per [passthrough-categories.md](references/passthrough-categories.md) |
+| Missing from blaude AND not prefix-covered | Recommend adding — assign to correct category per [passthrough-categories.md](references/passthrough-categories.md) |
 | Linux-irrelevant (e.g. `CLAUDE_CODE_USE_POWERSHELL_TOOL`) | Skip |
+| Set BY Claude Code in subprocesses (e.g. `CLAUDE_PROJECT_DIR`, `CLAUDECODE`) | Skip if not also consumed by claude itself |
+
+Since `ANTHROPIC_*`/`CLAUDE_*` coverage is automatic, the diff should focus on:
+- **Hardcoded interactions**: any new official `CLAUDE_*` var that blocks bypass-permissions, force-scrubs env, or otherwise needs to land in `_hardcoded_env_vars` / `_hardcoded_unsetenv_vars` instead of plain passthrough.
+- **Auto-mount needs**: any new `CLAUDE_*` var that points to a file/dir/socket — the prefix passes the value, but the mount loop still needs a separate entry (see [auto-mount-vars.md](references/auto-mount-vars.md)).
+- **Non-prefix additions**: new official vars *not* starting with `ANTHROPIC_` or `CLAUDE_` (e.g. new `OTEL_*`, `MCP_*`, `MAX_*`, `DISABLE_*` toggles, third-party cloud namespaces).
 
 For each blaude var NOT in official docs, classify as:
 
@@ -118,9 +127,13 @@ If blaude is fully up-to-date (no missing vars), say so clearly at the top of th
 
 ### 6. Apply changes (if user approves)
 
-Add approved vars to the `claude_env_vars` array in the correct category section. Match the existing formatting style (space-separated on lines, grouped under comment headers).
+For new vars that match `ANTHROPIC_*` or `CLAUDE_*`: no change is needed unless the var needs special handling (hardcode, deny, or mount).
 
-For vars that need mounts, add both the passthrough AND the bind-mount logic. Follow the existing pattern in blaude (e.g., the `CLAUDE_ENV_FILE` auto-mount block) — check if the var is set and the path exists before mounting.
+For new non-prefix vars: add to `claude_env_vars` in the correct category section. Match the existing formatting style (space-separated on lines, grouped under comment headers).
+
+For vars that need mounts (even prefix-covered ones), add the bind-mount logic. Follow the existing pattern in blaude (e.g., the `CLAUDE_ENV_FILE` auto-mount block) — check if the var is set and the path exists before mounting.
+
+For vars that need to be hardcoded or force-unset (e.g., new permission-mode blockers), add to `_hardcoded_env_vars` (with `=VALUE`) or `_hardcoded_unsetenv_vars` (bare name). The passthrough loop's deny-set will then protect them from the prefix match.
 
 ### 7. Update README.md and CLAUDE.md
 
@@ -128,18 +141,23 @@ After applying changes to the blaude script, update documentation to stay in syn
 
 #### README.md — Environment Variables table
 
-The `## Environment Variables` section in README.md contains a summary table of all passthrough categories and example variables. When vars are added or removed:
+The `## Environment Variables` section in README.md contains a summary table. The first two rows (`Anthropic namespace (prefix-matched)` and `Claude Code namespace (prefix-matched)`) cover everything under those prefixes via wildcards — no edit needed for routine `CLAUDE_CODE_*` / `ANTHROPIC_*` additions. Refresh the examples in those rows only when a notably new sub-pattern appears (e.g. a new `CLAUDE_CODE_NEWFEATURE_*` family).
 
-1. Find the matching category row in the table (e.g., `| **Features** | ... |`)
+For non-prefix additions:
+
+1. Find the matching category row in the table (e.g., `| **Other LLM APIs** | ... |`)
 2. Add/remove the var name from the appropriate row
 3. If a new category was added to blaude, add a new row to the table
-4. Keep table entries concise — use `VAR_PREFIX_*` wildcards where appropriate instead of listing every var
+4. Keep table entries concise
 
 #### CLAUDE.md — Environment Variable Passthrough section
 
-The `## Environment Variable Passthrough` section in CLAUDE.md lists:
+The `## Environment Variable Passthrough` section in CLAUDE.md describes the prefix-matching behavior and lists:
 - **Hardcoded vars**: Update if a new var is hardcoded via `--setenv` in the Claude Code config block
-- **Auto-mounted file/path vars**: Update the list if a new var triggers a bind-mount (both the passthrough AND mount were added)
+- **Hardcoded unsets**: Update if a new var must be force-unset
+- **Auto-mounted file/path vars**: Update the list if a new var triggers a bind-mount
+
+The "Glob patterns" bullet already covers `ANTHROPIC_*` and `CLAUDE_*` — no edit needed for routine prefix-covered additions.
 
 Only update these docs for changes that were actually applied to the blaude script — do not update docs for recommendations the user declined.
 
