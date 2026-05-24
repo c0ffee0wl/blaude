@@ -1064,6 +1064,10 @@ claude_env_vars=(
     # Runtime indicators (set by Claude Code itself or external tooling) and misc
     IS_DEMO FORCE_HYPERLINK USE_BUILTIN_RIPGREP CCR_FORCE_BUNDLE
     CLAUDECODE AI_AGENT DEBUG DISABLE_COST_WARNINGS
+    # Terminal identity (Warp/zap claude-code-warp extension gates notifications
+    # on these; WARP_* itself is matched by the glob below). TERM_PROGRAM also
+    # lets Claude Code apply its own terminal-specific behavior.
+    TERM_PROGRAM TERM_PROGRAM_VERSION
     # Additional LLM API keys (for MCP servers and tools that may use them)
     OPENAI_API_KEY OPENAI_API_BASE OPENAI_ORG_ID
     AZURE_OPENAI_API_KEY AZURE_OPENAI_ENDPOINT AZURE_OPENAI_API_VERSION
@@ -1100,6 +1104,7 @@ if [[ "$keep_env_mode" != true ]]; then
         [[ -n "${_env_denylist[$name]:-}" ]] && continue
         if [[ -n "${_env_whitelist[$name]:-}" || \
               "$name" == ANTHROPIC_* || "$name" == CLAUDE_* || \
+              "$name" == WARP_* || \
               "$name" == *_WEBHOOK || "$name" == WEBSHARE_* ]]; then
             _setenv_if_set "$name"
         fi
