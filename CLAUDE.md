@@ -101,6 +101,7 @@ These directories are mounted only if they exist on the host (not created automa
 | Directory | Access | Purpose |
 |-----------|--------|---------|
 | `~/.config/` | read-write | User config (uv, fabric, google-chrome, etc.) |
+| `~/.agents/` | read-only | Canonical store for `npx skills` (vercel-labs `skills`); global-scope `~/.claude/skills/<name>` symlinks point here. Read-only so the sandbox can't rewrite the shared cross-agent skill store. Project-scope skills already work via the workspace mount. |
 | `~/.bun/` | read-only | Bun runtime (`~/.bun/bin` added to PATH); `~/.bun/install/cache` gets a writable tmpfs overlay |
 | `~/arxiv-storage/` | read-write | Research paper management |
 | `~/.claude-mem/` | read-write | Persistent memory across sessions (auto-created if claude-mem plugin detected) |

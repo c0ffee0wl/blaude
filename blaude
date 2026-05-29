@@ -637,6 +637,12 @@ _ensure_and_bind "$config_dir" bind
 # Mount ~/.claude.json (OAuth session, MCP servers, preferences, caches)
 _bind_if_exists "$HOME/.claude.json" f bind
 
+# npx-installed skills (vercel-labs `skills`): canonical content lives in
+# ~/.agents/skills/<name>; ~/.claude/skills/<name> is a relative symlink to it.
+# Mount read-only so global-scope skills resolve inside the sandbox (project-scope
+# skills already work — both dirs live in the mounted workspace).
+_bind_if_exists "$HOME/.agents" d ro-bind
+
 # claudechic config file (~/.claude/.claudechic.yaml) is already accessible
 # via the config_dir mount above — do NOT bind-mount it directly, as claudechic
 # uses atomic writes (os.replace) which fail on bind-mounted files.
