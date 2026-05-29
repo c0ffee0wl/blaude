@@ -741,10 +741,18 @@ done
 _bind_env_path CLAUDE_SKILL_DIR d ro-bind
 
 # Directories — read-write
-for var in CLAUDE_CODE_PLUGIN_CACHE_DIR CLAUDE_PLUGIN_DATA CLAUDE_CODE_DEBUG_LOGS_DIR \
+for var in CLAUDE_CODE_PLUGIN_CACHE_DIR CLAUDE_PLUGIN_DATA \
            CLAUDE_CODE_WORKSPACE_DIR; do
     _bind_env_path "$var" d bind
 done
+
+# CLAUDE_CODE_DEBUG_LOGS_DIR is a FILE path despite its name (the debug log
+# file, default ~/.claude/debug/<session-id>.txt). The file won't exist yet,
+# so bind its parent directory read-write to let claude create it. Binding
+# the value itself as a directory would silently skip a custom file path.
+if [[ -n "${CLAUDE_CODE_DEBUG_LOGS_DIR:-}" ]]; then
+    _bind_if_exists "${CLAUDE_CODE_DEBUG_LOGS_DIR%/*}" d bind
+fi
 
 # CLAUDE_CODE_PLUGIN_SEED_DIR: colon-separated list of directories (Claude Code 2.1.79+)
 if [[ -n "${CLAUDE_CODE_PLUGIN_SEED_DIR:-}" ]]; then

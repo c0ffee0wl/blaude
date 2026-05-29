@@ -9,7 +9,7 @@ Some env vars point to files or directories that must be bind-mounted into the s
 | `CLAUDE_ENV_FILE` | `--ro-bind` (read-only) | File exists on host |
 | `CLAUDE_CODE_PLUGIN_SEED_DIR` | `--ro-bind` (read-only) | Directory exists on host |
 | `CLAUDE_CODE_PLUGIN_CACHE_DIR` | `--bind` (read-write) | Directory exists on host |
-| `CLAUDE_CODE_DEBUG_LOGS_DIR` | `--bind` (read-write) | Directory exists on host |
+| `CLAUDE_CODE_DEBUG_LOGS_DIR` | `--bind` (read-write) on parent dir | Set; value is a **file** path (despite the name) — `${VAR%/*}` parent dir bound rw so claude can create the log file |
 | `CLAUDE_CODE_CLIENT_CERT` | `--ro-bind` (read-only) | File exists on host |
 | `CLAUDE_CODE_CLIENT_KEY` | `--ro-bind` (read-only) | File exists on host |
 | `AWS_WEB_IDENTITY_TOKEN_FILE` | `--ro-bind` (read-only) | File exists on host |
