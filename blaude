@@ -847,7 +847,7 @@ else
         fi
         _protect_file() { bwrap_args+=(--ro-bind "$1" "$2"); }
 
-        for f in .bashrc .bash_profile .zshrc .zprofile .profile \
+        for f in .bashrc .bash_profile .bash_login .zshrc .zprofile .zshenv .zlogin .profile \
                  .gitconfig .gitmodules .ripgreprc .mcp.json; do
             [[ -f "$current_dir/$f" ]] && _protect_file "$current_dir/$f" "$workspace/$f"
         done
@@ -906,8 +906,9 @@ else
                        -o -name build -o -name .venv -o -name vendor \
                        -o -name __pycache__ -o -name .git \) -prune \
                     -o \
-                    \( -type f \( -name .bashrc -o -name .bash_profile \
-                                  -o -name .zshrc -o -name .zprofile -o -name .profile \
+                    \( -type f \( -name .bashrc -o -name .bash_profile -o -name .bash_login \
+                                  -o -name .zshrc -o -name .zprofile -o -name .zshenv -o -name .zlogin \
+                                  -o -name .profile \
                                   -o -name .gitconfig -o -name .gitmodules \
                                   -o -name .ripgreprc -o -name .mcp.json \) -print \) \
                     2>/dev/null

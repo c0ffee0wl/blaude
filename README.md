@@ -253,8 +253,8 @@ sandbox-runtime enforces this using ripgrep-based scanning with `/dev/null` over
 
 | Path | Risk |
 |------|------|
-| `.bashrc`, `.bash_profile`, `.profile` | Execute on shell open |
-| `.zshrc`, `.zprofile` | Execute on zsh open |
+| `.bashrc`, `.bash_profile`, `.bash_login`, `.profile` | Execute on shell open |
+| `.zshrc`, `.zprofile`, `.zshenv`, `.zlogin` | Execute on zsh open |
 | `.gitconfig`, `.gitmodules` | Git config manipulation, submodule URL hijacking |
 | `.git/config` | Can set `core.hooksPath`, `core.fsmonitor` for code execution |
 | `.ripgreprc` | Alters search tool behavior |
