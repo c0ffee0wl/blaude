@@ -52,7 +52,7 @@ def _copy_to_clipboard(payload, clip_cmd):
         subprocess.run(clip_cmd, input=base64.b64decode(payload), check=False,
                        timeout=_CLIPBOARD_TIMEOUT,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (subprocess.SubprocessError, OSError) as e:
+    except (subprocess.SubprocessError, OSError, ValueError) as e:
         if _OSC52_DEBUG:
             print(f"osc52-clipboard: copy failed: {e}", file=sys.stderr)
 

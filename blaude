@@ -87,6 +87,14 @@ else
     sandbox_gid=$_host_gid
 fi
 
+# Host-side cache directory for blaude's own state (boolean probes, package-mount
+# scans). Placed under $HOME/.cache, which the sandbox shadows with a tmpfs (see
+# "--tmpfs $HOME" below) and never binds back — so a contained agent cannot poison
+# cache files that a later blaude run reads and trusts. (Earlier versions used
+# /tmp, which IS bind-mounted read-write into the sandbox by default.)
+_cache_dir="$HOME/.cache/blaude"
+mkdir -p "$_cache_dir" 2>/dev/null && chmod 700 "$_cache_dir" 2>/dev/null
+
 env_args=()
 mount_args=()
 command_args=()
@@ -105,8 +113,8 @@ chic_mode=false
 clear_tmp_mode=false
 no_clipboard=false
 
-# Session-cache a boolean result at /tmp/blaude-<key>-$UID to avoid repeated
-# proc/help checks within a session. Compute fn must set _CACHED_BOOL_RESULT.
+# Cache a boolean result at $_cache_dir/<key>-$UID to avoid repeated
+# proc/help checks. Compute fn must set _CACHED_BOOL_RESULT.
 # Result is returned via the global _CACHED_BOOL_RESULT — assigning instead of
 # printing avoids the $(...) fork on every cache hit.
 # Optional 3rd arg: invalidate cache when that path is newer (stat via bash -nt,
@@ -114,7 +122,7 @@ no_clipboard=false
 _CACHED_BOOL_RESULT=""
 _cached_bool() {
     local key="$1" compute_fn="$2" invalidate_path="${3:-}"
-    local cache="/tmp/blaude-${key}-${_host_uid}"
+    local cache="${_cache_dir}/${key}-${_host_uid}"
     if [[ -f "$cache" ]] && \
        { [[ -z "$invalidate_path" ]] || [[ ! "$invalidate_path" -nt "$cache" ]]; }; then
         IFS= read -r _CACHED_BOOL_RESULT < "$cache"
@@ -411,7 +419,9 @@ _setup_resolv() {
     # readlink (no -f): need the raw link target to distinguish absolute vs relative.
     local resolv_target
     resolv_target=$(readlink /etc/resolv.conf)
-    resolv_tmp="/tmp/blaude-resolv-$$"
+    # mktemp: unguessable name, created O_EXCL (no symlink-follow), under the
+    # host-only cache dir rather than the agent-writable /tmp bind.
+    resolv_tmp=$(mktemp "${_cache_dir}/resolv.XXXXXX" 2>/dev/null) || { resolv_tmp=""; return; }
     if ! cat /etc/resolv.conf > "$resolv_tmp" 2>/dev/null || [[ ! -s "$resolv_tmp" ]]; then
         rm -f "$resolv_tmp"
         resolv_tmp=""
@@ -548,19 +558,23 @@ _bind_if_exists "$HOME/.cache/uv" d bind
 # subshell.
 # Cache-key caveat: directory mtime only bumps when direct children change, so a
 # new symlink nested deep under scan_root (e.g. a grandchild added by `npm i -g`)
-# won't invalidate the cache. Workaround: `rm /tmp/blaude-pkgmount-*-$UID`.
+# won't invalidate the cache. Workaround: `rm ~/.cache/blaude/pkgmount-*`.
 # Usage: _mount_linked_packages <label> <exclude_prefix> <find_args...>
 _mount_linked_packages() {
     local label="$1" exclude_prefix="$2"
     shift 2
     local scan_root="$1" scan_key
     scan_key=${scan_root//\//_}
-    local cache_file="/tmp/blaude-pkgmount-${label}-${scan_key}-${_host_uid}"
+    local cache_file="${_cache_dir}/pkgmount-${label}-${scan_key}-${_host_uid}"
     local -a link_targets=()
 
     if [[ -f "$cache_file" && ! "$scan_root" -nt "$cache_file" ]]; then
         while IFS= read -r line; do
-            [[ -n "$line" ]] && link_targets+=("$line")
+            # Defense-in-depth: re-verify each cached path is a real package
+            # root outside $HOME before trusting it for a mount. A poisoned
+            # cache must not be able to bind arbitrary host dirs into the sandbox.
+            [[ -n "$line" && -d "$line" && -f "$line/package.json" && "$line" != "$HOME" ]] \
+                && link_targets+=("$line")
         done < "$cache_file"
     else
         local -A seen=()
@@ -840,12 +854,27 @@ else
             [[ "$help" == *--tmp-overlay* ]] && _CACHED_BOOL_RESULT=true || _CACHED_BOOL_RESULT=false
         }
         _cached_bool overlay _detect_overlay "$_bwrap_bin"
+        # A protected source must resolve — after following any symlink in its
+        # path — to a location inside the workspace. Otherwise bwrap's bind would
+        # mount the host target's content into the sandbox: a malicious
+        # `.gitconfig -> ~/.ssh/id_rsa` or `.vscode -> ~/.aws` would leak host
+        # files the sandbox is specifically designed to exclude. A symlink left
+        # unprotected is harmless — its target isn't mounted, so it dangles inside
+        # the sandbox and can't be written through either.
+        _protected_src_ok() {
+            local real
+            [[ -n "$resolved_workspace" ]] || return 1   # fail closed: no root, no bind
+            real=$(readlink -f "$1" 2>/dev/null) || return 1
+            [[ "$real" == "$resolved_workspace" || "$real" == "$resolved_workspace"/* ]] && return 0
+            _dbg "Skipping protection for $1 (resolves to $real, outside workspace)"
+            return 1
+        }
         if [[ "$_CACHED_BOOL_RESULT" == true ]]; then
-            _protect_dir() { bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
+            _protect_dir() { _protected_src_ok "$1" || return; bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
-            _protect_dir() { bwrap_args+=(--ro-bind "$1" "$2"); }
+            _protect_dir() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
         fi
-        _protect_file() { bwrap_args+=(--ro-bind "$1" "$2"); }
+        _protect_file() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
 
         for f in .bashrc .bash_profile .bash_login .zshrc .zprofile .zshenv .zlogin .profile \
                  .gitconfig .gitmodules .ripgreprc .mcp.json; do
@@ -875,7 +904,7 @@ else
         # pruned first; then matches are pruned-and-printed so we don't descend.
         _apply_nested_protected() {
             local found rel
-            while IFS= read -r found; do
+            while IFS= read -r -d '' found; do
                 rel="${found#"$current_dir"/}"
                 case "${found##*/}" in
                     .git)
@@ -899,7 +928,7 @@ else
                        -o -name build -o -name .venv -o -name vendor \
                        -o -name __pycache__ \) -prune \
                     -o \
-                    \( -type d \( -name .git -o -name .vscode -o -name .idea \) -prune -print \) \
+                    \( -type d \( -name .git -o -name .vscode -o -name .idea \) -prune -print0 \) \
                     2>/dev/null
                 find "$current_dir" -mindepth 2 -maxdepth 3 \
                     \( -name node_modules -o -name target -o -name dist \
@@ -910,7 +939,7 @@ else
                                   -o -name .zshrc -o -name .zprofile -o -name .zshenv -o -name .zlogin \
                                   -o -name .profile \
                                   -o -name .gitconfig -o -name .gitmodules \
-                                  -o -name .ripgreprc -o -name .mcp.json \) -print \) \
+                                  -o -name .ripgreprc -o -name .mcp.json \) -print0 \) \
                     2>/dev/null
             )
         }
@@ -1233,6 +1262,9 @@ if [[ "$wsl_mode" == true ]]; then
     _dbg "WSL2 detected: applying workarounds"
 
     # Warn if workspace is on Windows filesystem (9P) - once per session
+    # Intentionally in /tmp, not $_cache_dir: a UX "warned once" flag, not
+    # trusted input — only its existence is checked, so a forged flag merely
+    # suppresses a warning. The per-reboot reset (/tmp cleared on boot) is wanted.
     wsl_mnt_warned="/tmp/blaude-mnt-warned-${_host_uid}"
     if [[ "$current_dir" == /mnt/* && ! -f "$wsl_mnt_warned" ]]; then
         echo "Warning: Workspace is on Windows filesystem (/mnt/*)." >&2
