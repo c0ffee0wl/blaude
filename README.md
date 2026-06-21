@@ -174,6 +174,8 @@ The entire `~/.config/` directory is mounted read-write if it exists. This inclu
 - **Google Chrome** (`~/.config/google-chrome/`) - Browser profile for automation (Puppeteer, Playwright, OAuth flows)
 - Other tool configurations as needed
 
+> **Note:** `~/.config/git/` (the XDG global git config) is the one exception — it is re-shadowed read-only (or as an ephemeral tmpfs if absent) on top of the read-write mount. git settings there (aliases, `core.pager`/`editor`/`fsmonitor`, `core.sshCommand`) execute on the *host* at the next git run outside the sandbox, so the sandbox cannot write them. Override with `--allow-protected-writes`.
+
 ```bash
 # Setup fabric outside sandbox first
 fabric --setup
@@ -220,11 +222,11 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 | **MCP standards** | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MCP_CONNECT_TIMEOUT_MS`, `MCP_OAUTH_CALLBACK_PORT`, `MCP_CLIENT_SECRET`, `MCP_SSE_URL`, `ENABLE_TOOL_SEARCH`, `ENABLE_CLAUDEAI_MCP_SERVERS`, `MCP_CONNECTION_NONBLOCKING`, `MCP_SERVER_CONNECTION_BATCH_SIZE`, `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` |
 | **OpenTelemetry** | `OTEL_*` (full set: exporter config, OTLP endpoints/protocols for metrics/logs/traces, client cert/key, log level toggles incl. `OTEL_LOG_RAW_API_BODIES`, resource attributes, etc.), `TRACEPARENT`, `TRACESTATE` |
 | **Bash / shell** | `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_OUTPUT_LENGTH`, `BASH_MAX_TIMEOUT_MS` |
-| **Tokens & retries** | `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, `MAX_STRUCTURED_OUTPUT_RETRIES`, `TASK_MAX_OUTPUT_LENGTH`, `SLASH_COMMAND_TOOL_CHAR_BUDGET`, `API_TIMEOUT_MS`, `FALLBACK_FOR_ALL_PRIMARY_MODELS` |
+| **Tokens & retries** | `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, `MAX_STRUCTURED_OUTPUT_RETRIES`, `TASK_MAX_OUTPUT_LENGTH`, `SLASH_COMMAND_TOOL_CHAR_BUDGET`, `API_TIMEOUT_MS`, `API_FORCE_IDLE_TIMEOUT`, `FALLBACK_FOR_ALL_PRIMARY_MODELS` |
 | **Network/TLS** | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS` |
 | **Updates/Installation** | `FORCE_AUTOUPDATE_PLUGINS`, `DISABLE_INSTALLATION_CHECKS`, `DISABLE_UPDATES`, `DISABLE_UPGRADE_COMMAND`, `DISABLE_DOCTOR_COMMAND`, `DISABLE_EXTRA_USAGE_COMMAND`, `DISABLE_LOGIN_COMMAND`, `DISABLE_LOGOUT_COMMAND`, `DISABLE_FEEDBACK_COMMAND` |
 | **Caching & compaction** | `DISABLE_PROMPT_CACHING*`, `DISABLE_NON_ESSENTIAL_MODEL_CALLS`, `DISABLE_AUTO_COMPACT`, `DISABLE_COMPACT`, `DISABLE_INTERLEAVED_THINKING`, `ENABLE_PROMPT_CACHING_1H`, `ENABLE_PROMPT_CACHING_1H_BEDROCK`, `FORCE_PROMPT_CACHING_5M` |
-| **Runtime indicators / misc** | `IS_DEMO`, `FORCE_HYPERLINK`, `USE_BUILTIN_RIPGREP`, `CCR_FORCE_BUNDLE`, `CLAUDECODE`, `AI_AGENT`, `DEBUG`, `DISABLE_COST_WARNINGS` |
+| **Runtime indicators / misc** | `IS_DEMO`, `FORCE_HYPERLINK`, `USE_BUILTIN_RIPGREP`, `CCR_FORCE_BUNDLE`, `CLAUDECODE`, `AI_AGENT`, `DEBUG`, `DISABLE_COST_WARNINGS`, `CI`, `NO_COLOR`, `FORCE_COLOR` |
 | **Other LLM APIs** | `OPENAI_API_KEY`, `OPENAI_API_BASE`, `OPENAI_ORG_ID`, `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `HUGGINGFACE_API_KEY`, `HF_TOKEN`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `REPLICATE_API_TOKEN`, `PERPLEXITY_API_KEY`, `FIREWORKS_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `JINA_API_KEY`, `EXA_API_KEY` |
 | **Third-party Services** | `FEEDLY_ACCESS_TOKEN`, `RAINDROP_ACCESS_TOKEN` |
 | **claudechic** | `CLAUDECHIC_DEBUG`, `CLAUDECHIC_REMOTE_PORT`, `CHIC_PROFILE`, `CHIC_SAMPLE_THRESHOLD` |

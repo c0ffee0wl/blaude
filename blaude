@@ -676,6 +676,20 @@ done
 # User config directory (~/.config/)
 # Includes uv config (python-preference), fabric, google-chrome, and other tool configs
 _bind_if_exists "$HOME/.config" d bind
+# The rw ~/.config mount above also exposes ~/.config/git/ (XDG global git config)
+# read-write. Settings there — aliases, core.pager/editor/fsmonitor, core.sshCommand —
+# execute on the *host* at the next git run outside the sandbox. Claude Code 2.1.160
+# prompts before writing it, but blaude passes --dangerously-skip-permissions (which
+# bypasses that prompt), so re-shadow it here, mirroring the workspace .gitconfig guard:
+#   existing dir -> read-only (content readable, writes blocked, no host artifact)
+#   missing dir  -> ephemeral tmpfs (blocks host file creation)
+if [[ "$allow_protected_writes" != true && -d "$HOME/.config" ]]; then
+    if [[ -d "$HOME/.config/git" ]]; then
+        bwrap_args+=(--ro-bind "$HOME/.config/git" "$HOME/.config/git")
+    else
+        bwrap_args+=(--tmpfs "$HOME/.config/git")
+    fi
+fi
 
 # arxiv-storage directory (for research paper management tools)
 _bind_if_exists "$HOME/arxiv-storage" d bind
@@ -751,9 +765,12 @@ fi
 
 # Files (mTLS, CA bundles, token files, env file, GCP creds) — read-only.
 # GOOGLE_APPLICATION_CREDENTIALS is Vertex-facing and shouldn't require --aws.
+# CLAUDE_CLIENT_PRESENCE_FILE (2.1.181): prefix-match passes the value, but it
+# names a marker file claude reads (screen-lock status for Remote Control mobile
+# push) — bind it read-only so the path resolves inside the sandbox.
 for var in CLAUDE_ENV_FILE CLAUDE_CODE_CLIENT_CERT CLAUDE_CODE_CLIENT_KEY \
            AWS_WEB_IDENTITY_TOKEN_FILE NODE_EXTRA_CA_CERTS \
-           GOOGLE_APPLICATION_CREDENTIALS; do
+           GOOGLE_APPLICATION_CREDENTIALS CLAUDE_CLIENT_PRESENCE_FILE; do
     _bind_env_path "$var" f ro-bind
 done
 
@@ -1093,7 +1110,7 @@ claude_env_vars=(
     BASH_DEFAULT_TIMEOUT_MS BASH_MAX_OUTPUT_LENGTH BASH_MAX_TIMEOUT_MS
     # Token & retry limits
     MAX_THINKING_TOKENS MAX_MCP_OUTPUT_TOKENS MAX_STRUCTURED_OUTPUT_RETRIES
-    TASK_MAX_OUTPUT_LENGTH SLASH_COMMAND_TOOL_CHAR_BUDGET API_TIMEOUT_MS
+    TASK_MAX_OUTPUT_LENGTH SLASH_COMMAND_TOOL_CHAR_BUDGET API_TIMEOUT_MS API_FORCE_IDLE_TIMEOUT
     FALLBACK_FOR_ALL_PRIMARY_MODELS
     # Network & TLS
     HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS
@@ -1109,6 +1126,9 @@ claude_env_vars=(
     # Runtime indicators (set by Claude Code itself or external tooling) and misc
     IS_DEMO FORCE_HYPERLINK USE_BUILTIN_RIPGREP CCR_FORCE_BUNDLE
     CLAUDECODE AI_AGENT DEBUG DISABLE_COST_WARNINGS
+    # Generic terminal/CI signals: CI affects print-mode (-p) Bedrock/Vertex/Foundry
+    # auth fallback; NO_COLOR/FORCE_COLOR apply to spawned subprocesses, not the UI.
+    CI NO_COLOR FORCE_COLOR
     # Terminal identity (Warp/zap claude-code-warp extension gates notifications
     # on these; WARP_* itself is matched by the glob below). TERM_PROGRAM also
     # lets Claude Code apply its own terminal-specific behavior.
