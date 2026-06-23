@@ -100,6 +100,7 @@ mount_args=()
 command_args=()
 tmp_mode=false
 no_network=false
+remote_control_mode=false
 git_mode=false
 ssh_mode=false
 aws_mode=false
@@ -187,6 +188,12 @@ while [[ $# -gt 0 ]]; do
             ssh_mode=true
             shift
             ;;
+        --remote-control)
+            # Consumed (not forwarded): prepare the env so /remote-control works
+            # on demand while claude still starts with --dangerously-skip-permissions.
+            remote_control_mode=true
+            shift
+            ;;
         --aws)
             aws_mode=true
             shift
@@ -245,6 +252,25 @@ done
 # (e.g., "./blaude --debug install" where $1 was --debug, not install)
 if [[ ${#command_args[@]} -gt 0 && "${command_args[0]}" =~ ^(update|install|install-github-app)$ ]]; then
     exec claude "${command_args[@]}"
+fi
+
+# Remote Control mode: `claude remote-control` (server mode) passes through as a
+# subcommand; the --remote-control flag was consumed above. All paths
+# set the same env mode so the GrowthBook feature-flag eligibility check can run
+# (see the hardcoded env-var section below). Match the bare subcommand only in
+# position 0 to avoid false positives like `-p "remote-control"`.
+[[ "${command_args[0]:-}" == "remote-control" ]] && remote_control_mode=true
+
+if [[ "$remote_control_mode" == true ]]; then
+    echo "Note: Remote Control mode — enabling telemetry + GrowthBook feature-flag fetching for" >&2
+    echo "  this session (required for Remote Control eligibility; off in normal sessions)." >&2
+    if [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        echo "  Note: ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN block Remote Control (needs claude.ai" >&2
+        echo "  OAuth) — forcing them unset inside the sandbox; claude will use your /login session." >&2
+    fi
+    echo "  Note: Remote Control requires approving actions interactively (the --dangerously-skip-permissions bypass does not apply)." >&2
+    [[ "$no_network" == true ]] && \
+        echo "  Warning: --no-network is set; Remote Control needs outbound network and will fail." >&2
 fi
 
 # --- Ensure Claude config has required flags ---
@@ -1029,11 +1055,15 @@ fi
 # them from the whitelist, so they can't drift if added to claude_env_vars
 # by accident). CLAUDE_DISABLE_CONFIG_WATCH prevents inotify ENOSPC crashes.
 _hardcoded_env_vars=(
-    DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_AUTOUPDATER=1 DISABLE_ERROR_REPORTING=1
+    DISABLE_AUTOUPDATER=1 DISABLE_ERROR_REPORTING=1
     DISABLE_BUG_COMMAND=1 CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
     DISABLE_INSTALL_GITHUB_APP_COMMAND=1 CLAUDE_DISABLE_CONFIG_WATCH=1
-    DISABLE_GROWTHBOOK=1
 )
+# Telemetry + GrowthBook opt-outs disable the feature-flag layer that gates Remote
+# Control eligibility, so they MUST be absent in Remote Control mode (forced unset
+# below). Privacy default keeps them on for every normal session.
+[[ "$remote_control_mode" != true ]] && \
+    _hardcoded_env_vars+=(DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_GROWTHBOOK=1)
 for _kv in "${_hardcoded_env_vars[@]}"; do
     bwrap_args+=(--setenv "${_kv%%=*}" "${_kv#*=}")
 done
@@ -1055,6 +1085,19 @@ _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
     CLAUDE_CODE_SESSION_ID CLAUDE_PROJECT_DIR
 )
+# Remote Control mode: force the telemetry/feature-flag opt-outs absent (so the
+# GrowthBook eligibility check can run) plus the auth vars that block RC — it needs
+# a full-scope claude.ai OAuth session, so a host ANTHROPIC_API_KEY or limited-scope
+# CLAUDE_CODE_OAUTH_TOKEN must not reach the sandbox (either triggers the misleading
+# "Remote Control is not yet enabled" error). Listing them here also enters them
+# into the passthrough deny-set (built from both arrays below), so the
+# ANTHROPIC_*/CLAUDE_* prefix match can't re-pass them.
+if [[ "$remote_control_mode" == true ]]; then
+    _hardcoded_unsetenv_vars+=(
+        DO_NOT_TRACK DISABLE_TELEMETRY DISABLE_GROWTHBOOK
+        ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
+    )
+fi
 for _var in "${_hardcoded_unsetenv_vars[@]}"; do
     bwrap_args+=(--unsetenv "$_var")
 done
@@ -1198,6 +1241,11 @@ elif [[ "$chic_mode" == true ]]; then
     else
         bwrap_args+=(claudechic --dangerously-skip-permissions "${command_args[@]}")
     fi
+elif [[ "${command_args[0]:-}" == "remote-control" ]]; then
+    # `claude remote-control` (server mode) is a subcommand that must be the first
+    # token and rejects --dangerously-skip-permissions (Remote Control enforces
+    # permission prompts regardless). Forward it verbatim without that flag.
+    bwrap_args+=(claude "${command_args[@]}")
 elif [[ ${#command_args[@]} -eq 0 ]]; then
     # No args: interactive claude (or -p for piped input)
     if [[ -t 0 ]]; then
