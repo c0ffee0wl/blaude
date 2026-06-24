@@ -268,7 +268,7 @@ if [[ "$remote_control_mode" == true ]]; then
         echo "  Note: ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN block Remote Control (needs claude.ai" >&2
         echo "  OAuth) — forcing them unset inside the sandbox; claude will use your /login session." >&2
     fi
-    echo "  Note: Remote Control requires approving actions interactively (the --dangerously-skip-permissions bypass does not apply)." >&2
+    echo "Note: Remote Control requires approving actions (--dangerously-skip-permissions does not apply)." >&2
     [[ "$no_network" == true ]] && \
         echo "  Warning: --no-network is set; Remote Control needs outbound network and will fail." >&2
 fi
