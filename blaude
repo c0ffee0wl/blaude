@@ -1116,6 +1116,7 @@ claude_env_vars=(
     AWS_PROFILE AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE
     # Google Cloud auth (Vertex AI)
     GCLOUD_PROJECT GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS
+    VERTEX_AI_PROJECT_ID
     CLOUD_RUN_JOB_ATTEMPT CLOUD_ML_REGION
     # Vertex region overrides (Anthropic-namespaced model regions)
     VERTEX_REGION_CLAUDE_3_5_HAIKU VERTEX_REGION_CLAUDE_3_5_SONNET
@@ -1133,8 +1134,12 @@ claude_env_vars=(
     MCP_TIMEOUT MCP_TOOL_TIMEOUT MCP_CONNECT_TIMEOUT_MS
     MCP_OAUTH_CALLBACK_PORT MCP_CLIENT_SECRET ENABLE_TOOL_SEARCH
     ENABLE_CLAUDEAI_MCP_SERVERS MCP_CONNECTION_NONBLOCKING
-    MCP_SERVER_CONNECTION_BATCH_SIZE MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE
+    MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE
     MCP_SSE_URL
+    # MCP_SERVER_<SERVER_ID>=<COMMAND> env-based server config — plus the
+    # MCP_SERVER_CONNECTION_BATCH_SIZE tunable — are matched by the MCP_SERVER_*
+    # glob in the passthrough loop below, so neither is listed explicitly here.
+    # (MCP_REMOTE_SERVER_* does not match that glob, hence its explicit entry above.)
     # OpenTelemetry exporter + W3C trace context
     OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER OTEL_TRACES_EXPORTER
     OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_HEADERS
@@ -1156,7 +1161,7 @@ claude_env_vars=(
     TASK_MAX_OUTPUT_LENGTH SLASH_COMMAND_TOOL_CHAR_BUDGET API_TIMEOUT_MS API_FORCE_IDLE_TIMEOUT
     FALLBACK_FOR_ALL_PRIMARY_MODELS
     # Network & TLS
-    HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS
+    HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS USE_BUILTIN_CA_BUNDLE
     # Updates & installation toggles
     FORCE_AUTOUPDATE_PLUGINS DISABLE_INSTALLATION_CHECKS DISABLE_UPDATES
     DISABLE_UPGRADE_COMMAND DISABLE_DOCTOR_COMMAND DISABLE_EXTRA_USAGE_COMMAND
@@ -1212,7 +1217,7 @@ if [[ "$keep_env_mode" != true ]]; then
         [[ -n "${_env_denylist[$name]:-}" ]] && continue
         if [[ -n "${_env_whitelist[$name]:-}" || \
               "$name" == ANTHROPIC_* || "$name" == CLAUDE_* || \
-              "$name" == WARP_* || \
+              "$name" == WARP_* || "$name" == MCP_SERVER_* || \
               "$name" == *_WEBHOOK || "$name" == WEBSHARE_* ]]; then
             _setenv_if_set "$name"
         fi
