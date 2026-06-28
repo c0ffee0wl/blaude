@@ -1036,12 +1036,18 @@ fi
 # paths (e.g. /opt/host-bin, /run/user/$sandbox_uid) rather than the host's originals.
 bwrap_args+=(--setenv XDG_RUNTIME_DIR "/run/user/$sandbox_uid")
 sandbox_path="$HOME/.local/bin:$HOME/go/bin:$HOME/.cargo/bin:$HOME/.bun/bin:/opt/host-bin:/opt/host-cargo-bin:/opt/host-go-bin"
-# Add NVM bin directory if NVM is installed (for npx, node, npm)
+# Node version managers (nvm/fnm). Resolve each manager's active node bin dir, then
+# put the manager that is ACTIVE in the launching shell at the FRONT of PATH so
+# node/npm/npx resolve to the user's selected version — mirroring how fnm/nvm prepend
+# on the host. Otherwise an earlier entry ($HOME/.bun/bin, which often ships a `node`
+# shim, or a system node) shadows it. "Active" = the manager whose env var is exported
+# in this shell; fnm wins if both are. A merely-installed-but-inactive manager is
+# appended as a low-priority fallback so it can't override the user's actual node.
+# nvm: $NVM_BIN when active, else the configured default / newest install.
+nvm_node_bin=""
 if [[ -n "${NVM_BIN:-}" ]]; then
-    sandbox_path="$sandbox_path:$NVM_BIN"
+    nvm_node_bin="$NVM_BIN"
 elif [[ "$nvm_installed" == true ]]; then
-    # Try to find the current/default node version
-    nvm_node_bin=""
     if [[ -f "$HOME/.nvm/alias/default" ]]; then
         # Read default version from alias file (contains version string like "v22.21.1")
         nvm_version=$(< "$HOME/.nvm/alias/default")
@@ -1060,13 +1066,12 @@ elif [[ "$nvm_installed" == true ]]; then
         done
         unset _nvm_bin
     fi
-    [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
 fi
-# Add fnm's active node bin. The launching shell's $FNM_MULTISHELL_PATH points (via
-# /run/user/<uid>/fnm_multishells, absent in-sandbox) at the active version, so
-# resolve it to its real path under $FNM_DIR; fall back to aliases/default, then newest.
+# fnm: $FNM_MULTISHELL_PATH (active in the launching shell, points via
+# /run/user/<uid>/fnm_multishells — absent in-sandbox) resolved to its real path under
+# $FNM_DIR; fall back to aliases/default, then newest install.
+fnm_node_bin=""
 if [[ "$fnm_installed" == true ]]; then
-    fnm_node_bin=""
     if [[ -n "${FNM_MULTISHELL_PATH:-}" && -d "$FNM_MULTISHELL_PATH/bin" ]]; then
         fnm_node_bin=$(readlink -f "$FNM_MULTISHELL_PATH/bin" 2>/dev/null)
     fi
@@ -1080,13 +1085,24 @@ if [[ "$fnm_installed" == true ]]; then
         done
         unset _fnm_bin
     fi
-    # Only trust a path that resolves inside the mounted $FNM_DIR.
-    [[ -n "$fnm_node_bin" && "$fnm_node_bin" == "$fnm_dir"/* && -d "$fnm_node_bin" ]] \
-        && sandbox_path="$sandbox_path:$fnm_node_bin"
-    # fnm binary itself (curl install lives at $FNM_DIR/fnm).
-    [[ -x "$fnm_dir/fnm" ]] && sandbox_path="$sandbox_path:$fnm_dir"
+    # Trust only a path that resolves to a real dir inside the mounted $FNM_DIR; drop it otherwise.
+    [[ -n "$fnm_node_bin" && ! ( "$fnm_node_bin" == "$fnm_dir"/* && -d "$fnm_node_bin" ) ]] && fnm_node_bin=""
 fi
-# Secondary package-manager global bin dirs.
+# Front-load the active manager's node bin; append the inactive one as a fallback.
+if [[ -n "${FNM_MULTISHELL_PATH:-}" && -n "$fnm_node_bin" ]]; then
+    sandbox_path="$fnm_node_bin:$sandbox_path"
+    [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
+elif [[ -n "${NVM_BIN:-}" && -n "$nvm_node_bin" ]]; then
+    sandbox_path="$nvm_node_bin:$sandbox_path"
+    [[ -n "$fnm_node_bin" ]] && sandbox_path="$sandbox_path:$fnm_node_bin"
+else
+    # No manager active in this shell — append whatever is installed (fallback only).
+    [[ -n "$fnm_node_bin" ]] && sandbox_path="$sandbox_path:$fnm_node_bin"
+    [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
+fi
+# fnm binary itself (curl install lives at $FNM_DIR/fnm) + secondary PM bins. None of
+# these provide `node`, so their order doesn't affect node resolution.
+[[ "$fnm_installed" == true && -x "$fnm_dir/fnm" ]] && sandbox_path="$sandbox_path:$fnm_dir"
 [[ -d "$pnpm_home/bin" ]] && sandbox_path="$sandbox_path:$pnpm_home/bin"
 [[ -d "$HOME/.yarn/bin" ]] && sandbox_path="$sandbox_path:$HOME/.yarn/bin"
 sandbox_path="$sandbox_path:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
