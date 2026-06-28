@@ -664,6 +664,40 @@ if [[ -d "$HOME/.nvm" ]]; then
         "$HOME/.nvm/versions" -type l -path "*/node_modules/*"
 fi
 
+# Bind fnm (Fast Node Manager). fnm installs Node to
+# $FNM_DIR/node-versions/<v>/installation/ and exposes the active version via a
+# per-shell symlink $FNM_MULTISHELL_PATH (under $XDG_RUNTIME_DIR, an empty tmpfs
+# in-sandbox), so we mount the real $FNM_DIR and (in the PATH section below) point
+# PATH at the resolved installation bin dir. `fnm env` always exports FNM_DIR, so
+# custom dirs are honored.
+fnm_installed=false
+fnm_dir="${FNM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/fnm}"
+if [[ -d "$fnm_dir" ]]; then
+    fnm_installed=true
+    _bind_if_exists "$fnm_dir" d ro-bind
+    _mount_linked_packages "npm" "$fnm_dir" \
+        "$fnm_dir/node-versions" -type l -path "*/node_modules/*"
+fi
+
+# Secondary Node package managers keep global installs / bin shims / caches OUTSIDE
+# the node-manager dir, so the fnm/nvm mounts don't cover them. Mount read-only and
+# (in the PATH section below) wire global bin dirs onto PATH. Gated on existence —
+# tool-agnostic, so this also benefits nvm/bun users.
+# pnpm: bins in $PNPM_HOME/bin; isolated globals + content store under $PNPM_HOME.
+pnpm_home="${PNPM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/pnpm}"
+if [[ -d "$pnpm_home" ]]; then
+    _bind_if_exists "$pnpm_home" d ro-bind
+    # `pnpm link --global` / `pnpm add -g <local dir>` symlinks escaping $PNPM_HOME.
+    # Scope to global/ — never scan the (huge) content store.
+    _mount_linked_packages "npm" "$pnpm_home" \
+        "$pnpm_home/global" -type l -path "*/node_modules/*"
+fi
+# corepack: shims live in node's bin (already mounted); real pnpm/yarn cached here.
+corepack_home="${COREPACK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/node/corepack}"
+_bind_if_exists "$corepack_home" d ro-bind
+# yarn classic global bins (globals in ~/.config/yarn, already rw-mounted).
+_bind_if_exists "$HOME/.yarn" d ro-bind
+
 _mount_host_bin "$HOME/.cargo/bin" host-cargo-bin
 _mount_host_bin "$HOME/go/bin" host-go-bin
 
@@ -1028,17 +1062,48 @@ elif [[ "$nvm_installed" == true ]]; then
     fi
     [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
 fi
+# Add fnm's active node bin. The launching shell's $FNM_MULTISHELL_PATH points (via
+# /run/user/<uid>/fnm_multishells, absent in-sandbox) at the active version, so
+# resolve it to its real path under $FNM_DIR; fall back to aliases/default, then newest.
+if [[ "$fnm_installed" == true ]]; then
+    fnm_node_bin=""
+    if [[ -n "${FNM_MULTISHELL_PATH:-}" && -d "$FNM_MULTISHELL_PATH/bin" ]]; then
+        fnm_node_bin=$(readlink -f "$FNM_MULTISHELL_PATH/bin" 2>/dev/null)
+    fi
+    if [[ -z "$fnm_node_bin" && -d "$fnm_dir/aliases/default/bin" ]]; then
+        fnm_node_bin=$(readlink -f "$fnm_dir/aliases/default/bin" 2>/dev/null)
+    fi
+    if [[ -z "$fnm_node_bin" && -d "$fnm_dir/node-versions" ]]; then
+        for _fnm_bin in "$fnm_dir/node-versions"/*/installation/bin; do
+            [[ -d "$_fnm_bin" ]] || continue
+            [[ -z "$fnm_node_bin" || "$_fnm_bin" -nt "$fnm_node_bin" ]] && fnm_node_bin="$_fnm_bin"
+        done
+        unset _fnm_bin
+    fi
+    # Only trust a path that resolves inside the mounted $FNM_DIR.
+    [[ -n "$fnm_node_bin" && "$fnm_node_bin" == "$fnm_dir"/* && -d "$fnm_node_bin" ]] \
+        && sandbox_path="$sandbox_path:$fnm_node_bin"
+    # fnm binary itself (curl install lives at $FNM_DIR/fnm).
+    [[ -x "$fnm_dir/fnm" ]] && sandbox_path="$sandbox_path:$fnm_dir"
+fi
+# Secondary package-manager global bin dirs.
+[[ -d "$pnpm_home/bin" ]] && sandbox_path="$sandbox_path:$pnpm_home/bin"
+[[ -d "$HOME/.yarn/bin" ]] && sandbox_path="$sandbox_path:$HOME/.yarn/bin"
 sandbox_path="$sandbox_path:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
 bwrap_args+=(--setenv PATH "$sandbox_path")
 # Package manager environment variables
 bwrap_args+=(--setenv GOPATH "$HOME/go")
 bwrap_args+=(--setenv CARGO_HOME "$HOME/.cargo")
-# NVM environment: set NVM_DIR and skip NPM_CONFIG_PREFIX (NVM manages its own prefix)
-if [[ "$nvm_installed" == true ]]; then
-    bwrap_args+=(--setenv NVM_DIR "$HOME/.nvm")
-else
+# NVM/fnm manage their own npm prefix (inside the version install); only set
+# NPM_CONFIG_PREFIX when neither is in use.
+[[ "$nvm_installed" == true ]] && bwrap_args+=(--setenv NVM_DIR "$HOME/.nvm")
+[[ "$fnm_installed" == true ]] && bwrap_args+=(--setenv FNM_DIR "$fnm_dir")
+if [[ "$nvm_installed" != true && "$fnm_installed" != true ]]; then
     bwrap_args+=(--setenv NPM_CONFIG_PREFIX "$HOME/.local")
 fi
+# Point pnpm/corepack at their mounted homes so installed tools resolve.
+[[ -d "$pnpm_home" ]] && bwrap_args+=(--setenv PNPM_HOME "$pnpm_home")
+[[ -d "$corepack_home" ]] && bwrap_args+=(--setenv COREPACK_HOME "$corepack_home")
 if [[ "$keep_env_mode" != true ]]; then
     bwrap_args+=(--setenv LANG "${LANG:-C.UTF-8}")
     _setenv_if_set LC_ALL
