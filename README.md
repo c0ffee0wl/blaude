@@ -141,6 +141,7 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `~/.local/share/claude`, `~/.local/share/pipx`, `~/.local/share/uv/{tools,python}` | read-only | Claude data and tool-manager venvs |
 | `~/.local/bin` → `/opt/host-bin` | read-only | Host user binaries re-mounted under `/opt/` and added to PATH (the `claude` binary is also bound at its original path) |
 | `~/.cargo/bin` → `/opt/host-cargo-bin`, `~/go/bin` → `/opt/host-go-bin` | read-only | Cargo/Go bins re-mounted under `/opt/` and added to PATH |
+| `/opt/<vendor>/…` (pwsh, Chrome, Chromium, Edge, Brave, dotnet) | read-only | Tools whose `/usr/bin` launcher is a symlink into `/opt` — the install dir is auto-bound so the symlink resolves in-sandbox (the empty `--dir /opt` otherwise shadows it). Only for tools present on the host. Chrome/Chromium need `--no-sandbox` under bwrap; snap installs (resolving to `/snap`) are skipped. |
 | `~/.cache/uv` | read-write | uv cache bound from host if it exists |
 | `~/.cache`, `~/go`, `~/.cargo` | ephemeral | Scaffolded on a tmpfs `$HOME` — cleared on exit |
 

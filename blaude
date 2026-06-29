@@ -559,6 +559,39 @@ _mount_host_bin() {
 
 _mount_host_bin "$HOME/.local/bin" host-bin
 
+# Some host tools are /usr/bin front-end symlinks (FHS "add-on package" pattern)
+# whose real binary lives under /opt — sometimes via an /etc/alternatives hop, e.g.
+#   pwsh                 -> /opt/microsoft/powershell/7/pwsh
+#   google-chrome-stable -> /opt/google/chrome/google-chrome
+#   microsoft-edge       -> /opt/microsoft/msedge/microsoft-edge
+# The empty `--dir /opt` above shadows those targets, so the symlinks dangle and
+# the tools vanish in-sandbox even though /usr/bin is on PATH. For each known tool
+# whose resolved path (readlink -f follows the whole chain) lands in /opt, bind its
+# install dir read-only so the symlink resolves. Browsers matter for headless
+# automation MCP servers (Playwright/Puppeteer/chrome-devtools) — note Chrome must
+# be launched with --no-sandbox inside bwrap. Snap installs resolve to /snap (need
+# snap's loopback-mount machinery) and are skipped safely by the /opt guard. An
+# unlisted /opt tool can still be exposed on demand with `-m /opt/<vendor>/<tool>`.
+_mount_opt_frontend_tools() {
+    local tool bin real dir
+    local -A seen=()
+    for tool in pwsh pwsh-preview \
+                google-chrome google-chrome-stable chromium chromium-browser \
+                microsoft-edge microsoft-edge-stable brave-browser dotnet; do
+        bin=$(command -v "$tool" 2>/dev/null) || continue
+        real=$(readlink -f "$bin" 2>/dev/null) || continue
+        # Require >=2 levels under /opt (/opt/<vendor>/<bin>...) so stripping the
+        # basename can never collapse to /opt itself and ro-bind the whole host
+        # /opt — that would undo the deliberate empty `--dir /opt` boundary.
+        case "$real" in /opt/*/*) ;; *) continue ;; esac
+        dir="${real%/*}"
+        [[ -n "${seen[$dir]:-}" ]] && continue
+        seen[$dir]=1
+        _bind_if_exists "$dir" d ro-bind
+    done
+}
+_mount_opt_frontend_tools
+
 # Bind claude binary (Claude Code checks for itself there).
 # Uses 'e' kind so symlinks to claude are also bound.
 _bind_if_exists "$HOME/.local/bin/claude" e ro-bind
