@@ -870,9 +870,13 @@ done
 # Directories — read-only (skill dir is inert data)
 _bind_env_path CLAUDE_SKILL_DIR d ro-bind
 
-# Directories — read-write
+# Directories — read-write. The *_DIR overrides below default under ~/.claude
+# (already mounted); the explicit bind only matters when one is pointed at a
+# custom host path — bind it rw so claude can persist there. Bind-if-exists,
+# matching the other claude-managed dirs.
 for var in CLAUDE_CODE_PLUGIN_CACHE_DIR CLAUDE_PLUGIN_DATA \
-           CLAUDE_CODE_WORKSPACE_DIR; do
+           CLAUDE_CODE_WORKSPACE_DIR CLAUDE_LOGS_DIR CLAUDE_MCP_STDERR_LOG_DIR \
+           CLAUDE_SESSION_METADATA_DIR CLAUDE_CODE_WORKSPACE_STATE_DIR; do
     _bind_env_path "$var" d bind
 done
 
@@ -1230,7 +1234,7 @@ claude_env_vars=(
     AWS_PROFILE AWS_ROLE_ARN AWS_WEB_IDENTITY_TOKEN_FILE
     # Google Cloud auth (Vertex AI)
     GCLOUD_PROJECT GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS
-    VERTEX_AI_PROJECT_ID
+    VERTEX_AI_PROJECT_ID VERTEX_AI_API_ENDPOINT
     CLOUD_RUN_JOB_ATTEMPT CLOUD_ML_REGION
     # Vertex region overrides (Anthropic-namespaced model regions)
     VERTEX_REGION_CLAUDE_3_5_HAIKU VERTEX_REGION_CLAUDE_3_5_SONNET
@@ -1245,7 +1249,7 @@ claude_env_vars=(
     # GPG (for signed commits — agent socket bound separately under --git)
     GPG_TTY GNUPGHOME
     # MCP standards
-    MCP_TIMEOUT MCP_TOOL_TIMEOUT MCP_CONNECT_TIMEOUT_MS
+    MCP_TIMEOUT MCP_TOOL_TIMEOUT MCP_CONNECT_TIMEOUT_MS MCP_ENABLED
     MCP_OAUTH_CALLBACK_PORT MCP_CLIENT_SECRET ENABLE_TOOL_SEARCH
     ENABLE_CLAUDEAI_MCP_SERVERS MCP_CONNECTION_NONBLOCKING
     MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE
@@ -1275,7 +1279,8 @@ claude_env_vars=(
     TASK_MAX_OUTPUT_LENGTH SLASH_COMMAND_TOOL_CHAR_BUDGET API_TIMEOUT_MS API_FORCE_IDLE_TIMEOUT
     FALLBACK_FOR_ALL_PRIMARY_MODELS
     # Network & TLS
-    HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS USE_BUILTIN_CA_BUNDLE
+    HTTP_PROXY HTTPS_PROXY SOCKS_PROXY NO_PROXY
+    NODE_EXTRA_CA_CERTS USE_BUILTIN_CA_BUNDLE USE_SYSTEM_CA NODE_TLS_REJECT_UNAUTHORIZED
     # Updates & installation toggles
     FORCE_AUTOUPDATE_PLUGINS DISABLE_INSTALLATION_CHECKS DISABLE_UPDATES
     DISABLE_UPGRADE_COMMAND DISABLE_DOCTOR_COMMAND DISABLE_EXTRA_USAGE_COMMAND
