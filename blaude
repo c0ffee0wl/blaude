@@ -1192,16 +1192,19 @@ unset _kv
 # whenever defined (even =0), overriding --dangerously-skip-permissions.
 # The CLAUDE_CODE_* / CLAUDE_PROJECT_DIR markers are set by an outer
 # claude process for its subprocess env (ENTRYPOINT/EXECPATH identify
-# the parent's binary, SESSION_ID is the parent's UUID, PROJECT_DIR is
-# the parent's cwd). When blaude is invoked from inside another claude
-# session, the ANTHROPIC_*/CLAUDE_* prefix passthrough would silently
-# inherit these into the sandboxed inner claude — wrong identity, wrong
-# paths (outer binary not reachable inside the sandbox), conflated
-# session telemetry. Force-unset so inner claude starts clean.
+# the parent's binary, SESSION_ID is the parent's UUID,
+# BRIDGE_SESSION_ID the parent's Remote Control session ID (2.1.199+),
+# PROJECT_DIR is the parent's cwd). When blaude is invoked from inside
+# another claude session, the ANTHROPIC_*/CLAUDE_* prefix passthrough
+# would silently inherit these into the sandboxed inner claude — wrong
+# identity, wrong paths (outer binary not reachable inside the
+# sandbox), conflated session telemetry. Force-unset so inner claude
+# starts clean.
 _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
     CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
-    CLAUDE_CODE_SESSION_ID CLAUDE_PROJECT_DIR
+    CLAUDE_CODE_SESSION_ID CLAUDE_CODE_BRIDGE_SESSION_ID
+    CLAUDE_PROJECT_DIR
 )
 # Remote Control mode: force the telemetry/feature-flag opt-outs absent (so the
 # GrowthBook eligibility check can run) plus the auth vars that block RC — it needs
@@ -1245,6 +1248,7 @@ claude_env_vars=(
     VERTEX_REGION_CLAUDE_4_6_OPUS VERTEX_REGION_CLAUDE_4_6_SONNET
     VERTEX_REGION_CLAUDE_4_7_OPUS VERTEX_REGION_CLAUDE_4_8_OPUS
     VERTEX_REGION_CLAUDE_HAIKU_4_5 VERTEX_REGION_CLAUDE_FABLE_5
+    VERTEX_REGION_CLAUDE_5_SONNET
     VERTEX_REGION_DEFAULT VERTEX_REGION_SMALL_FAST_MODEL
     # GPG (for signed commits — agent socket bound separately under --git)
     GPG_TTY GNUPGHOME
