@@ -22,10 +22,22 @@ sed -n '/^claude_env_vars=(/,/^)/p' "$BLAUDE" \
   | sort -u
 
 echo ""
-echo "=== AUTO-MOUNTED FILE VARS ==="
-# Vars that trigger auto-mounting of files/dirs into the sandbox
-grep -oP '(?<=\$\{)[A-Z_]+(?=\b)' "$BLAUDE" \
-  | sort -u \
-  | while read -r var; do
-      grep -q "$var.*--ro-bind\|--bind.*$var\|auto.*mount.*$var\|$var.*mount" "$BLAUDE" 2>/dev/null && echo "$var" || true
-    done
+echo "=== FORCE-UNSET (_hardcoded_unsetenv_vars, incl. RC-mode conditionals) ==="
+awk '/_hardcoded_unsetenv_vars\+?=\(/{f=1} f{print} f&&/\)/{f=0}' "$BLAUDE" \
+  | grep -v '^\s*#' \
+  | grep -oE '\b[A-Z][A-Z0-9_]+\b' \
+  | sort -u
+
+echo ""
+echo "=== AUTO-MOUNTED FILE/PATH VARS ==="
+# Env vars whose paths get bind-mounted into the sandbox:
+#  - direct `_bind_env_path VAR` calls
+#  - `for var in ...; do _bind_env_path "$var"` loops
+#  - special cases that dereference the var inline (parent-dir binds like
+#    "${VAR%/*}", colon-separated lists split via <<< "$VAR")
+{
+  grep -oE '_bind_env_path +[A-Z][A-Z0-9_]+' "$BLAUDE" | grep -oE '[A-Z][A-Z0-9_]+' || true
+  awk '/^for var in/{blk=""; f=1} f{blk=blk" "$0} f&&/^done/{f=0; if (blk ~ /_bind_env_path/) print blk}' "$BLAUDE" \
+    | grep -oE '\b[A-Z][A-Z0-9_]+\b' || true
+  grep -oE '(_bind_if_exists|<<<) +"\$\{?[A-Z][A-Z0-9_]+' "$BLAUDE" | grep -oE '[A-Z][A-Z0-9_]+$' || true
+} | grep -vE '^(HOME|UID)$' | sort -u

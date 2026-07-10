@@ -17,9 +17,11 @@ if ! command -v claude &>/dev/null; then
     exit 1
 fi
 # Commands that must run outside the sandbox (need write access to system paths).
+# One regex, tested both as $1 here and post-flag-parse below (e.g. `--debug install`).
 # DISABLE_UPDATES (Claude Code 2.1.118+) is enforced by claude itself via the
 # inherited host env — no host-side guard needed; claude prints its own message.
-if [[ "${1:-}" =~ ^(update|install|install-github-app)$ ]]; then
+_bypass_cmds_re='^(update|install|install-github-app)$'
+if [[ "${1:-}" =~ $_bypass_cmds_re ]]; then
     exec claude "$@"
 fi
 
@@ -101,6 +103,7 @@ command_args=()
 tmp_mode=false
 no_network=false
 remote_control_mode=false
+rc_subcommand=false
 git_mode=false
 ssh_mode=false
 aws_mode=false
@@ -149,7 +152,7 @@ wsl_mode=$_CACHED_BOOL_RESULT
 
 # Find asciinema's PID by walking ancestor processes via /proc.
 _find_asciinema_pid() {
-    local pid ppid key val _
+    local pid ppid key val comm _
     pid=$$
     while [[ $pid -gt 1 ]]; do
         ppid=
@@ -157,7 +160,12 @@ _find_asciinema_pid() {
             [[ "$key" == "PPid" ]] && ppid=$val && break
         done < /proc/$pid/status 2>/dev/null
         [[ -z "$ppid" || "$ppid" == "0" ]] && return 1
-        if [[ "$(< /proc/$ppid/comm 2>/dev/null)" == "asciinema" ]]; then
+        # No $(< file 2>/dev/null): the redirect breaks the bash file-read
+        # optimization and always yields "" (same gotcha as the settings scan
+        # below). 2>/dev/null before < so a vanished process stays quiet.
+        comm=""
+        IFS= read -r comm 2>/dev/null < "/proc/$ppid/comm"
+        if [[ "$comm" == "asciinema" ]]; then
             echo "$ppid"
             return 0
         fi
@@ -250,7 +258,7 @@ done
 
 # Post-parsing bypass: catch install/update commands after blaude flags
 # (e.g., "./blaude --debug install" where $1 was --debug, not install)
-if [[ ${#command_args[@]} -gt 0 && "${command_args[0]}" =~ ^(update|install|install-github-app)$ ]]; then
+if [[ ${#command_args[@]} -gt 0 && "${command_args[0]}" =~ $_bypass_cmds_re ]]; then
     exec claude "${command_args[@]}"
 fi
 
@@ -258,8 +266,12 @@ fi
 # subcommand; the --remote-control flag was consumed above. All paths
 # set the same env mode so the GrowthBook feature-flag eligibility check can run
 # (see the hardcoded env-var section below). Match the bare subcommand only in
-# position 0 to avoid false positives like `-p "remote-control"`.
-[[ "${command_args[0]:-}" == "remote-control" ]] && remote_control_mode=true
+# position 0 to avoid false positives like `-p "remote-control"`. rc_subcommand
+# additionally selects the verbatim no-skip-permissions branch in "Build command".
+if [[ "${command_args[0]:-}" == "remote-control" ]]; then
+    remote_control_mode=true
+    rc_subcommand=true
+fi
 
 if [[ "$remote_control_mode" == true ]]; then
     echo "Note: Remote Control mode — enabling telemetry + GrowthBook feature-flag fetching for" >&2
@@ -370,11 +382,11 @@ _bind_if_exists() {
     esac
     bwrap_args+=(--"$mode" "$path" "$path")
 }
-# Ensure directory exists (creating if needed), then bind-mount at its own location.
+# Ensure directory exists (creating if needed), then bind-mount it read-write
+# at its own location (every caller needs rw persistence).
 _ensure_and_bind() {
-    local path="$1" mode="$2"
-    [[ -d "$path" ]] || mkdir -p "$path" 2>/dev/null
-    _bind_if_exists "$path" d "$mode"
+    [[ -d "$1" ]] || mkdir -p "$1" 2>/dev/null
+    _bind_if_exists "$1" d bind
 }
 _dbg() { [[ "$debug" == true ]] && echo "$@" >&2; }
 
@@ -391,17 +403,50 @@ _reject_if_home() {
     exit 1
 }
 
+# Single sources for the workspace scans below. Noise dirs are pruned for scan
+# cost (not security) and keep cold-cache scans sub-second on monorepos. The
+# protected-dotfile set feeds both the static top-level pass and the nested
+# find — drift between two hand-kept copies would weaken the guarantee.
+_protected_dotfiles=(.bashrc .bash_profile .bash_login .zshrc .zprofile .zshenv
+                     .zlogin .profile .gitconfig .gitmodules .ripgreprc .mcp.json)
+# Build a find name-alternation ("-name a -o -name b ...") into the named array.
+_name_expr() {
+    local -n _ne_out=$1; shift
+    _ne_out=(-name "$1"); shift
+    local _n
+    for _n in "$@"; do _ne_out+=(-o -name "$_n"); done
+}
+_name_expr _noise_expr node_modules target dist build .venv vendor __pycache__
+_name_expr _dotfile_expr "${_protected_dotfiles[@]}"
+
+# Set the named variable to the most recently modified existing dir among the
+# args (pass a glob; an unmatched glob passes through as a literal and fails -d).
+_newest_dir() {
+    local -n _nd_out=$1; shift
+    local _d
+    for _d in "$@"; do
+        [[ -d "$_d" && ( -z "$_nd_out" || "$_d" -nt "$_nd_out" ) ]] && _nd_out="$_d"
+    done
+    return 0
+}
+
 # Warn about symlinks inside <root> whose targets escape it. bwrap mounts
 # don't follow these, but if the target happens to be writable via another
 # mount (e.g. -m ~/secrets:rw), Claude could traverse the link unexpectedly.
 # Skips in-tree targets and known-safe system paths.
-# Pruned dirs (node_modules etc.) keep cold-cache scan sub-second on monorepos.
 _scan_workspace_symlinks() {
-    local root="$1" link target rel header_shown=false
-    while IFS= read -r -d '' link; do
-        # -m resolves the path even if the target is missing — broken symlinks
-        # are still a smell (target may appear later via mount/race).
-        target=$(readlink -m "$link" 2>/dev/null) || continue
+    local root="$1" target rel header_shown=false i
+    local -a links=() targets=()
+    mapfile -d '' links < <(find "$root" -maxdepth 4 \
+                 \( "${_noise_expr[@]}" -o -name .git \) -prune \
+                 -o -type l -print0 2>/dev/null)
+    ((${#links[@]})) || return 0
+    # One readlink fork for all links, not one per link. -m resolves even when
+    # the target is missing — broken symlinks are still a smell (target may
+    # appear later via mount/race) — and always prints, so indexes stay paired.
+    mapfile -d '' targets < <(readlink -mz -- "${links[@]}" 2>/dev/null)
+    for i in "${!links[@]}"; do
+        target="${targets[i]:-}"
         [[ -z "$target" ]] && continue
         case "$target" in
             "$root"|"$root"/*) continue ;;
@@ -412,13 +457,9 @@ _scan_workspace_symlinks() {
             echo "Warning: workspace contains symlinks pointing outside the tree:" >&2
             header_shown=true
         fi
-        rel="${link#"$root"/}"
+        rel="${links[i]#"$root"/}"
         printf '  %s -> %s\n' "$rel" "$target" >&2
-    done < <(find "$root" -maxdepth 4 \
-                 \( -name node_modules -o -name .git -o -name target \
-                    -o -name dist -o -name build -o -name .venv \
-                    -o -name vendor -o -name __pycache__ \) -prune \
-                 -o -type l -print0 2>/dev/null)
+    done
 }
 
 # System mounts (read-only)
@@ -535,7 +576,7 @@ unset _d
 if [[ "$keyring_mode" == true ]]; then
     keyrings_dir="$HOME/.local/share/keyrings"
     _dbg "Binding GNOME Keyring storage: $keyrings_dir"
-    _ensure_and_bind "$keyrings_dir" bind
+    _ensure_and_bind "$keyrings_dir"
 fi
 
 # npm cache: bind host's cache if it exists (for npx-based MCP servers),
@@ -550,11 +591,12 @@ fi
 # Many tools in ~/.local/bin are symlinks to pipx/uv venvs
 bwrap_args+=(--dir /opt)
 
-# Mount a host directory under /opt/<name> (read-only), creating the mount point.
+# Mount a host directory under /opt/<name>, read-only (bwrap auto-creates the
+# mount point, same as every other bind DEST).
 _mount_host_bin() {
     local host="$1" name="$2"
     [[ -d "$host" ]] || return
-    bwrap_args+=(--dir "/opt/$name" --ro-bind "$host" "/opt/$name")
+    bwrap_args+=(--ro-bind "$host" "/opt/$name")
 }
 
 _mount_host_bin "$HOME/.local/bin" host-bin
@@ -573,13 +615,16 @@ _mount_host_bin "$HOME/.local/bin" host-bin
 # snap's loopback-mount machinery) and are skipped safely by the /opt guard. An
 # unlisted /opt tool can still be exposed on demand with `-m /opt/<vendor>/<tool>`.
 _mount_opt_frontend_tools() {
-    local tool bin real dir
+    local real dir
     local -A seen=()
-    for tool in pwsh pwsh-preview \
-                google-chrome google-chrome-stable chromium chromium-browser \
-                microsoft-edge microsoft-edge-stable brave-browser dotnet; do
-        bin=$(command -v "$tool" 2>/dev/null) || continue
-        real=$(readlink -f "$bin" 2>/dev/null) || continue
+    local -a bins=()
+    # Two forks total (command -v prints one line per *found* tool; readlink
+    # batch-resolves them) instead of up to two forks per listed tool.
+    mapfile -t bins < <(command -v pwsh pwsh-preview \
+        google-chrome google-chrome-stable chromium chromium-browser \
+        microsoft-edge microsoft-edge-stable brave-browser dotnet 2>/dev/null)
+    ((${#bins[@]})) || return 0
+    while IFS= read -r -d '' real; do
         # Require >=2 levels under /opt (/opt/<vendor>/<bin>...) so stripping the
         # basename can never collapse to /opt itself and ro-bind the whole host
         # /opt — that would undo the deliberate empty `--dir /opt` boundary.
@@ -588,7 +633,7 @@ _mount_opt_frontend_tools() {
         [[ -n "${seen[$dir]:-}" ]] && continue
         seen[$dir]=1
         _bind_if_exists "$dir" d ro-bind
-    done
+    done < <(readlink -fz -- "${bins[@]}" 2>/dev/null)
 }
 _mount_opt_frontend_tools
 
@@ -637,9 +682,13 @@ _mount_linked_packages() {
         done < "$cache_file"
     else
         local -A seen=()
-        while IFS= read -r -d '' symlink; do
-            local target
-            target=$(readlink -f "$symlink" 2>/dev/null)
+        local -a scan_symlinks=()
+        local target
+        mapfile -d '' scan_symlinks < <(find "$@" -print0 2>/dev/null)
+        # Batch-resolve every symlink in one readlink fork — the per-symlink
+        # fork was the dominant cold-scan cost on a populated nvm/bun tree.
+        # Only the targets are consumed, so unresolvable links simply drop out.
+        while IFS= read -r -d '' target; do
             [[ -z "$target" || "$target" == "$exclude_prefix"* ]] && continue
             # Walk up to package root (directory with package.json)
             local link_dir="$target"
@@ -651,7 +700,7 @@ _mount_linked_packages() {
                 seen[$link_dir]=1
                 link_targets+=("$link_dir")
             fi
-        done < <(find "$@" -print0 2>/dev/null)
+        done < <( ((${#scan_symlinks[@]})) && readlink -fz -- "${scan_symlinks[@]}" 2>/dev/null )
         printf '%s\n' "${link_targets[@]}" > "$cache_file" 2>/dev/null || true
     fi
 
@@ -690,11 +739,12 @@ _mount_linked_packages() {
 # Bind NVM (Node Version Manager) for npx-based MCP servers
 # NVM installs Node.js to ~/.nvm/versions/node/<version>/
 nvm_installed=false
-if [[ -d "$HOME/.nvm" ]]; then
+nvm_dir="$HOME/.nvm"
+if [[ -d "$nvm_dir" ]]; then
     nvm_installed=true
-    _bind_if_exists "$HOME/.nvm" d ro-bind
-    _mount_linked_packages "npm" "$HOME/.nvm" \
-        "$HOME/.nvm/versions" -type l -path "*/node_modules/*"
+    _bind_if_exists "$nvm_dir" d ro-bind
+    _mount_linked_packages "npm" "$nvm_dir" \
+        "$nvm_dir/versions" -type l -path "*/node_modules/*"
 fi
 
 # Bind fnm (Fast Node Manager). fnm installs Node to
@@ -739,7 +789,7 @@ _mount_host_bin "$HOME/go/bin" host-go-bin
 _bind_if_exists "$HOME/.local/share/claude" d ro-bind
 
 # Ensure config directory exists on host, then bind-mount (bwrap --bind auto-creates DEST)
-_ensure_and_bind "$config_dir" bind
+_ensure_and_bind "$config_dir"
 
 # Mount ~/.claude.json (OAuth session, MCP servers, preferences, caches)
 _bind_if_exists "$HOME/.claude.json" f bind
@@ -763,7 +813,7 @@ fi
 
 # notebooklm-mcp auth directories (token cache, Chrome profiles, config)
 for notebooklm_dir in "$HOME/.notebooklm-mcp" "$HOME/.notebooklm-mcp-cli"; do
-    _ensure_and_bind "$notebooklm_dir" bind
+    _ensure_and_bind "$notebooklm_dir"
 done
 
 # User config directory (~/.config/)
@@ -843,12 +893,15 @@ if [[ "$git_mode" == true ]]; then
 fi
 
 # SSH mode: mount SSH keys and forward SSH agent
+ssh_agent_ok=false  # socket validated once here; the env section reuses the verdict
 if [[ "$ssh_mode" == true ]]; then
     _bind_if_exists "$HOME/.ssh" d ro-bind
     # Bind the socket's parent dir so socket re-creation by systemd-tmpfile
     # (e.g. after `systemctl --user restart ssh-agent`) stays visible.
-    [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]] && \
+    if [[ -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
+        ssh_agent_ok=true
         _bind_if_exists "${SSH_AUTH_SOCK%/*}" d bind
+    fi
 fi
 
 # AWS mode: mount AWS config/credentials for Bedrock authentication
@@ -989,22 +1042,24 @@ else
             _protect_dir() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
         fi
         _protect_file() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
+        # .git protection strategy, shared by the top-level and nested passes:
+        # protect config + hooks/ individually when hooks/ exists; otherwise
+        # overlay the whole .git/ to prevent hooks/ creation (also covers config).
+        _protect_git() {
+            if [[ -d "$1/hooks" ]]; then
+                [[ -f "$1/config" ]] && _protect_file "$1/config" "$2/config"
+                _protect_dir "$1/hooks" "$2/hooks"
+            else
+                _protect_dir "$1" "$2"
+            fi
+        }
 
-        for f in .bashrc .bash_profile .bash_login .zshrc .zprofile .zshenv .zlogin .profile \
-                 .gitconfig .gitmodules .ripgreprc .mcp.json; do
+        for f in "${_protected_dotfiles[@]}"; do
             [[ -f "$current_dir/$f" ]] && _protect_file "$current_dir/$f" "$workspace/$f"
         done
 
         # .git/* paths: only protect if .git is a directory (not a file, as in git worktrees)
-        if [[ -d "$current_dir/.git" ]]; then
-            if [[ -d "$current_dir/.git/hooks" ]]; then
-                [[ -f "$current_dir/.git/config" ]] && _protect_file "$current_dir/.git/config" "$workspace/.git/config"
-                _protect_dir "$current_dir/.git/hooks" "$workspace/.git/hooks"
-            else
-                # hooks/ missing — overlay .git/ to prevent hooks/ creation (also covers config)
-                _protect_dir "$current_dir/.git" "$workspace/.git"
-            fi
-        fi
+        [[ -d "$current_dir/.git" ]] && _protect_git "$current_dir/.git" "$workspace/.git"
 
         # .claude/ left writable — skills and agents need to be modifiable
 
@@ -1014,20 +1069,17 @@ else
         # Same protection for nested protected paths (monorepos, git submodules,
         # vendored deps). mindepth 2 skips the top-level (already done above).
         # maxdepth 3 catches submodules and one level of vendored deps without
-        # exploding scan time on monorepos. Noise dirs (node_modules etc.) are
-        # pruned first; then matches are pruned-and-printed so we don't descend.
+        # exploding scan time on monorepos. One traversal: noise dirs are pruned
+        # first; protected dirs are pruned-and-printed so we don't descend (which
+        # also keeps dotfiles under a protected dir out of the file branch — they
+        # would be shadowed by its overlay anyway); protected dotfiles print last.
         _apply_nested_protected() {
             local found rel
             while IFS= read -r -d '' found; do
                 rel="${found#"$current_dir"/}"
                 case "${found##*/}" in
                     .git)
-                        if [[ -d "$found/hooks" ]]; then
-                            [[ -f "$found/config" ]] && _protect_file "$found/config" "$workspace/$rel/config"
-                            _protect_dir "$found/hooks" "$workspace/$rel/hooks"
-                        else
-                            _protect_dir "$found" "$workspace/$rel"
-                        fi
+                        _protect_git "$found" "$workspace/$rel"
                         ;;
                     .vscode|.idea)
                         _protect_dir "$found" "$workspace/$rel"
@@ -1038,22 +1090,11 @@ else
                 esac
             done < <(
                 find "$current_dir" -mindepth 2 -maxdepth 3 \
-                    \( -name node_modules -o -name target -o -name dist \
-                       -o -name build -o -name .venv -o -name vendor \
-                       -o -name __pycache__ \) -prune \
+                    \( "${_noise_expr[@]}" \) -prune \
                     -o \
                     \( -type d \( -name .git -o -name .vscode -o -name .idea \) -prune -print0 \) \
-                    2>/dev/null
-                find "$current_dir" -mindepth 2 -maxdepth 3 \
-                    \( -name node_modules -o -name target -o -name dist \
-                       -o -name build -o -name .venv -o -name vendor \
-                       -o -name __pycache__ -o -name .git \) -prune \
                     -o \
-                    \( -type f \( -name .bashrc -o -name .bash_profile -o -name .bash_login \
-                                  -o -name .zshrc -o -name .zprofile -o -name .zshenv -o -name .zlogin \
-                                  -o -name .profile \
-                                  -o -name .gitconfig -o -name .gitmodules \
-                                  -o -name .ripgreprc -o -name .mcp.json \) -print0 \) \
+                    \( -type f \( "${_dotfile_expr[@]}" \) -print0 \) \
                     2>/dev/null
             )
         }
@@ -1085,24 +1126,18 @@ nvm_node_bin=""
 if [[ -n "${NVM_BIN:-}" ]]; then
     nvm_node_bin="$NVM_BIN"
 elif [[ "$nvm_installed" == true ]]; then
-    if [[ -f "$HOME/.nvm/alias/default" ]]; then
+    if [[ -f "$nvm_dir/alias/default" ]]; then
         # Read default version from alias file (contains version string like "v22.21.1")
-        nvm_version=$(< "$HOME/.nvm/alias/default")
+        nvm_version=$(< "$nvm_dir/alias/default")
         # Handle lts/* aliases (e.g., "lts/iron" -> read actual version from lts alias)
         if [[ "$nvm_version" == lts/* ]]; then
             lts_name="${nvm_version#lts/}"
-            [[ -f "$HOME/.nvm/alias/lts/$lts_name" ]] && nvm_version=$(< "$HOME/.nvm/alias/lts/$lts_name")
+            [[ -f "$nvm_dir/alias/lts/$lts_name" ]] && nvm_version=$(< "$nvm_dir/alias/lts/$lts_name")
         fi
-        [[ -d "$HOME/.nvm/versions/node/$nvm_version/bin" ]] && nvm_node_bin="$HOME/.nvm/versions/node/$nvm_version/bin"
+        [[ -d "$nvm_dir/versions/node/$nvm_version/bin" ]] && nvm_node_bin="$nvm_dir/versions/node/$nvm_version/bin"
     fi
     # Fall back to most recently modified node version (globbing avoids parsing ls output).
-    if [[ -z "$nvm_node_bin" && -d "$HOME/.nvm/versions/node" ]]; then
-        for _nvm_bin in "$HOME/.nvm/versions/node"/*/bin; do
-            [[ -d "$_nvm_bin" ]] || continue
-            [[ -z "$nvm_node_bin" || "$_nvm_bin" -nt "$nvm_node_bin" ]] && nvm_node_bin="$_nvm_bin"
-        done
-        unset _nvm_bin
-    fi
+    [[ -z "$nvm_node_bin" ]] && _newest_dir nvm_node_bin "$nvm_dir/versions/node"/*/bin
 fi
 # fnm: $FNM_MULTISHELL_PATH (active in the launching shell, points via
 # /run/user/<uid>/fnm_multishells — absent in-sandbox) resolved to its real path under
@@ -1115,13 +1150,7 @@ if [[ "$fnm_installed" == true ]]; then
     if [[ -z "$fnm_node_bin" && -d "$fnm_dir/aliases/default/bin" ]]; then
         fnm_node_bin=$(readlink -f "$fnm_dir/aliases/default/bin" 2>/dev/null)
     fi
-    if [[ -z "$fnm_node_bin" && -d "$fnm_dir/node-versions" ]]; then
-        for _fnm_bin in "$fnm_dir/node-versions"/*/installation/bin; do
-            [[ -d "$_fnm_bin" ]] || continue
-            [[ -z "$fnm_node_bin" || "$_fnm_bin" -nt "$fnm_node_bin" ]] && fnm_node_bin="$_fnm_bin"
-        done
-        unset _fnm_bin
-    fi
+    [[ -z "$fnm_node_bin" ]] && _newest_dir fnm_node_bin "$fnm_dir/node-versions"/*/installation/bin
     # Trust only a path that resolves to a real dir inside the mounted $FNM_DIR; drop it otherwise.
     [[ -n "$fnm_node_bin" && ! ( "$fnm_node_bin" == "$fnm_dir"/* && -d "$fnm_node_bin" ) ]] && fnm_node_bin=""
 fi
@@ -1149,7 +1178,7 @@ bwrap_args+=(--setenv GOPATH "$HOME/go")
 bwrap_args+=(--setenv CARGO_HOME "$HOME/.cargo")
 # NVM/fnm manage their own npm prefix (inside the version install); only set
 # NPM_CONFIG_PREFIX when neither is in use.
-[[ "$nvm_installed" == true ]] && bwrap_args+=(--setenv NVM_DIR "$HOME/.nvm")
+[[ "$nvm_installed" == true ]] && bwrap_args+=(--setenv NVM_DIR "$nvm_dir")
 [[ "$fnm_installed" == true ]] && bwrap_args+=(--setenv FNM_DIR "$fnm_dir")
 if [[ "$nvm_installed" != true && "$fnm_installed" != true ]]; then
     bwrap_args+=(--setenv NPM_CONFIG_PREFIX "$HOME/.local")
@@ -1162,10 +1191,8 @@ if [[ "$keep_env_mode" != true ]]; then
     _setenv_if_set LC_ALL
     _setenv_if_set LC_CTYPE
 
-    # SSH agent forwarding env var
-    if [[ "$ssh_mode" == true && -n "${SSH_AUTH_SOCK:-}" && -S "$SSH_AUTH_SOCK" ]]; then
-        _setenv_if_set SSH_AUTH_SOCK
-    fi
+    # SSH agent forwarding env var (socket validated once at the mount site)
+    [[ "$ssh_agent_ok" == true ]] && _setenv_if_set SSH_AUTH_SOCK
 fi
 
 # Hardcoded env-var overrides — KEY=VALUE pairs forced into the sandbox,
@@ -1190,21 +1217,27 @@ unset _kv
 # Hardcoded env-var unsets — forced absent regardless of host env.
 # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB triggers permission-mode hardening
 # whenever defined (even =0), overriding --dangerously-skip-permissions.
-# The CLAUDE_CODE_* / CLAUDE_PROJECT_DIR markers are set by an outer
-# claude process for its subprocess env (ENTRYPOINT/EXECPATH identify
-# the parent's binary, SESSION_ID is the parent's UUID,
+# The CLAUDE_CODE_* / CLAUDE_EFFORT / CLAUDE_PROJECT_DIR markers are set
+# by an outer claude process for its subprocess env (ENTRYPOINT/EXECPATH
+# identify the parent's binary, SESSION_ID is the parent's UUID,
 # BRIDGE_SESSION_ID the parent's Remote Control session ID (2.1.199+),
-# PROJECT_DIR is the parent's cwd). When blaude is invoked from inside
-# another claude session, the ANTHROPIC_*/CLAUDE_* prefix passthrough
-# would silently inherit these into the sandboxed inner claude — wrong
-# identity, wrong paths (outer binary not reachable inside the
-# sandbox), conflated session telemetry. Force-unset so inner claude
-# starts clean.
+# CHILD_SESSION=1 marks a nested session (2.1.172+) — inheriting it
+# excludes the sandboxed session from --resume/--continue/history,
+# breaking blaude -c, TEAM_NAME is the parent's agent-team membership,
+# REMOTE/REMOTE_SESSION_ID the parent's claude.ai cloud-session
+# identity, EFFORT the parent turn's effort level, PROJECT_DIR the
+# parent's cwd). When blaude is invoked from inside another claude
+# session, the ANTHROPIC_*/CLAUDE_* prefix passthrough would silently
+# inherit these into the sandboxed inner claude — wrong identity, wrong
+# paths (outer binary not reachable inside the sandbox), conflated
+# session telemetry. Force-unset so inner claude starts clean.
 _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
     CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
     CLAUDE_CODE_SESSION_ID CLAUDE_CODE_BRIDGE_SESSION_ID
-    CLAUDE_PROJECT_DIR
+    CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_TEAM_NAME
+    CLAUDE_CODE_REMOTE CLAUDE_CODE_REMOTE_SESSION_ID
+    CLAUDE_EFFORT CLAUDE_PROJECT_DIR
 )
 # Remote Control mode: force the telemetry/feature-flag opt-outs absent (so the
 # GrowthBook eligibility check can run) plus the auth vars that block RC — it needs
@@ -1239,17 +1272,10 @@ claude_env_vars=(
     GCLOUD_PROJECT GOOGLE_CLOUD_PROJECT GOOGLE_APPLICATION_CREDENTIALS
     VERTEX_AI_PROJECT_ID VERTEX_AI_API_ENDPOINT
     CLOUD_RUN_JOB_ATTEMPT CLOUD_ML_REGION
-    # Vertex region overrides (Anthropic-namespaced model regions)
-    VERTEX_REGION_CLAUDE_3_5_HAIKU VERTEX_REGION_CLAUDE_3_5_SONNET
-    VERTEX_REGION_CLAUDE_3_7_SONNET
-    VERTEX_REGION_CLAUDE_4_0_OPUS VERTEX_REGION_CLAUDE_4_0_SONNET
-    VERTEX_REGION_CLAUDE_4_1_OPUS VERTEX_REGION_CLAUDE_4_1_SONNET
-    VERTEX_REGION_CLAUDE_4_5_OPUS VERTEX_REGION_CLAUDE_4_5_SONNET
-    VERTEX_REGION_CLAUDE_4_6_OPUS VERTEX_REGION_CLAUDE_4_6_SONNET
-    VERTEX_REGION_CLAUDE_4_7_OPUS VERTEX_REGION_CLAUDE_4_8_OPUS
-    VERTEX_REGION_CLAUDE_HAIKU_4_5 VERTEX_REGION_CLAUDE_FABLE_5
-    VERTEX_REGION_CLAUDE_5_SONNET
-    VERTEX_REGION_DEFAULT VERTEX_REGION_SMALL_FAST_MODEL
+    # Vertex region overrides (VERTEX_REGION_DEFAULT, VERTEX_REGION_SMALL_FAST_MODEL,
+    # per-model VERTEX_REGION_CLAUDE_*) are matched by the VERTEX_REGION_* glob in
+    # the passthrough loop below — enumerating them here required a blaude commit
+    # for every new Claude model.
     # GPG (for signed commits — agent socket bound separately under --git)
     GPG_TTY GNUPGHOME
     # MCP standards
@@ -1289,9 +1315,11 @@ claude_env_vars=(
     FORCE_AUTOUPDATE_PLUGINS DISABLE_INSTALLATION_CHECKS DISABLE_UPDATES
     DISABLE_UPGRADE_COMMAND DISABLE_DOCTOR_COMMAND DISABLE_EXTRA_USAGE_COMMAND
     DISABLE_LOGIN_COMMAND DISABLE_LOGOUT_COMMAND DISABLE_FEEDBACK_COMMAND
-    # Caching & compaction toggles
-    DISABLE_PROMPT_CACHING DISABLE_PROMPT_CACHING_HAIKU DISABLE_PROMPT_CACHING_OPUS
-    DISABLE_PROMPT_CACHING_SONNET DISABLE_PROMPT_CACHING_FABLE DISABLE_NON_ESSENTIAL_MODEL_CALLS
+    # Caching & compaction toggles. DISABLE_PROMPT_CACHING and its per-model
+    # DISABLE_PROMPT_CACHING_<MODEL> variants are matched by the
+    # DISABLE_PROMPT_CACHING* glob in the passthrough loop below (same
+    # new-model churn as VERTEX_REGION_*).
+    DISABLE_NON_ESSENTIAL_MODEL_CALLS
     DISABLE_AUTO_COMPACT DISABLE_COMPACT DISABLE_INTERLEAVED_THINKING
     ENABLE_PROMPT_CACHING_1H ENABLE_PROMPT_CACHING_1H_BEDROCK FORCE_PROMPT_CACHING_5M
     # Runtime indicators (set by Claude Code itself or external tooling) and misc
@@ -1340,6 +1368,7 @@ if [[ "$keep_env_mode" != true ]]; then
         [[ -n "${_env_denylist[$name]:-}" ]] && continue
         if [[ -n "${_env_whitelist[$name]:-}" || \
               "$name" == ANTHROPIC_* || "$name" == CLAUDE_* || \
+              "$name" == VERTEX_REGION_* || "$name" == DISABLE_PROMPT_CACHING* || \
               "$name" == WARP_* || "$name" == MCP_SERVER_* || \
               "$name" == *_WEBHOOK || "$name" == WEBSHARE_* ]]; then
             _setenv_if_set "$name"
@@ -1363,13 +1392,9 @@ if [[ "$exec_mode" == true ]]; then
     # --exec: run arbitrary command
     bwrap_args+=("${command_args[@]}")
 elif [[ "$chic_mode" == true ]]; then
-    # --chic: run claudechic instead of claude
-    if [[ ${#command_args[@]} -eq 0 ]]; then
-        bwrap_args+=(claudechic --dangerously-skip-permissions)
-    else
-        bwrap_args+=(claudechic --dangerously-skip-permissions "${command_args[@]}")
-    fi
-elif [[ "${command_args[0]:-}" == "remote-control" ]]; then
+    # --chic: run claudechic instead of claude (an empty command_args expands to nothing)
+    bwrap_args+=(claudechic --dangerously-skip-permissions "${command_args[@]}")
+elif [[ "$rc_subcommand" == true ]]; then
     # `claude remote-control` (server mode) is a subcommand that must be the first
     # token and rejects --dangerously-skip-permissions (Remote Control enforces
     # permission prompts regardless). Forward it verbatim without that flag.

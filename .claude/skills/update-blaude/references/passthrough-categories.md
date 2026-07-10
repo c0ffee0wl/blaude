@@ -6,7 +6,6 @@
 |---|---|
 | `# Bedrock / AWS auth` | `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_PROFILE`, `AWS_REGION` |
 | `# Google Cloud auth (Vertex AI)` | `GCLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS`, `CLOUD_ML_REGION` |
-| `# Vertex region overrides` | `VERTEX_REGION_CLAUDE_*`, `VERTEX_REGION_DEFAULT`, `VERTEX_REGION_SMALL_FAST_MODEL` |
 | `# GPG` | `GPG_TTY`, `GNUPGHOME` |
 | `# MCP standards` | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `ENABLE_TOOL_SEARCH`, `ENABLE_CLAUDEAI_MCP_SERVERS` |
 | `# OpenTelemetry exporter + W3C trace context` | `OTEL_*`, `TRACEPARENT`, `TRACESTATE` |
@@ -25,6 +24,8 @@
 
 - **`ANTHROPIC_*`**: all Anthropic-namespaced vars (`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL*`, `ANTHROPIC_BEDROCK_*`, `ANTHROPIC_FOUNDRY_*`, `ANTHROPIC_VERTEX_*`, etc.)
 - **`CLAUDE_*`**: all Claude Code vars (`CLAUDE_CODE_*`, `CLAUDE_AGENT_SDK_*`, `CLAUDE_AUTOCOMPACT_*`, `CLAUDE_BASH_*`, `CLAUDE_CONFIG_DIR`, `CLAUDE_EFFORT`, `CLAUDE_ENABLE_*`, `CLAUDE_ENV_FILE`, `CLAUDE_MEM_*`, `CLAUDE_PLUGIN_*`, `CLAUDE_REMOTE_CONTROL_*`, `CLAUDE_SKILL_DIR`, `CLAUDE_STREAM_*`, etc.)
+- **`VERTEX_REGION_*`**: all Vertex per-model region overrides plus `VERTEX_REGION_DEFAULT` / `VERTEX_REGION_SMALL_FAST_MODEL` — new models need no blaude change
+- **`DISABLE_PROMPT_CACHING*`**: the bare toggle and every per-model `DISABLE_PROMPT_CACHING_<MODEL>` variant
 - **`*_WEBHOOK`** and **`WEBSHARE_*`**: other prefix patterns in the loop
 
 ## Intentional non-official vars

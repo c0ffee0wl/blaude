@@ -12,6 +12,9 @@ Some env vars point to files or directories that must be bind-mounted into the s
 | `CLAUDE_CODE_DEBUG_LOGS_DIR` | `--bind` (read-write) on parent dir | Set; value is a **file** path (despite the name) — `${VAR%/*}` parent dir bound rw so claude can create the log file |
 | `CLAUDE_CODE_CLIENT_CERT` | `--ro-bind` (read-only) | File exists on host |
 | `CLAUDE_CODE_CLIENT_KEY` | `--ro-bind` (read-only) | File exists on host |
+| `CLAUDE_CLIENT_PRESENCE_FILE` | `--ro-bind` (read-only) | File exists on host (Remote Control screen-lock marker, 2.1.181+) |
+| `CLAUDE_SKILL_DIR` | `--ro-bind` (read-only) | Directory exists on host |
+| `CLAUDE_PLUGIN_DATA`, `CLAUDE_CODE_WORKSPACE_DIR`, `CLAUDE_LOGS_DIR`, `CLAUDE_MCP_STDERR_LOG_DIR`, `CLAUDE_SESSION_METADATA_DIR`, `CLAUDE_CODE_WORKSPACE_STATE_DIR` | `--bind` (read-write) | Directory exists on host (custom overrides; defaults live under the already-mounted `~/.claude`). No longer on the env-vars docs page as of 2.1.206 — kept for back-compat |
 | `AWS_WEB_IDENTITY_TOKEN_FILE` | `--ro-bind` (read-only) | File exists on host |
 | `NODE_EXTRA_CA_CERTS` | `--ro-bind` (read-only) | File exists on host |
 | `SSH_AUTH_SOCK` | `--bind` (read-write) on parent dir | Socket exists, `--ssh` flag (parent dir is bound so the socket survives systemd-tmpfile rotation) |
