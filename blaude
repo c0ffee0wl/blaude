@@ -334,6 +334,14 @@ if [[ -d /etc/claude-code/managed-settings.d ]]; then
         [[ -f "$_f" ]] && _settings_files+=("$_f")
     done
 fi
+# Project scope completes the chain (managed -> user -> project -> local): the key
+# is documented as working from any scope, so a repo's own settings can disable
+# bypass mode too. Read from the host path ($current_dir) — $workspace is the
+# in-sandbox path and isn't assigned until much later. Skipped under --tmp, where
+# the workspace is never mounted and the warning would be a false positive.
+[[ "$tmp_mode" != true ]] && \
+    _settings_files+=("$current_dir/.claude/settings.json"
+                      "$current_dir/.claude/settings.local.json")
 for _settings_file in "${_settings_files[@]}"; do
     [[ -f "$_settings_file" && -r "$_settings_file" ]] || continue
     [[ "$(< "$_settings_file")" =~ $_disable_re ]] || continue
@@ -950,6 +958,19 @@ if [[ -n "${CLAUDE_CODE_PLUGIN_SEED_DIR:-}" ]]; then
     unset _seed_dirs _seed_dir
 fi
 
+# Launcher/wrapper executables. Both vars hold an argv *prefix* (e.g.
+# "/opt/corp/launcher --profile claude"), not a bare path, so bind only the first
+# token. The prefix match passes the value; the binary would otherwise be missing.
+# SHELL_PREFIX wraps every Bash tool call, hook, status-line command, and stdio MCP
+# server startup, so a dangling path breaks all four. PROCESS_WRAPPER (2.1.208) is
+# canonically under /opt, which blaude builds as an empty --dir — it dangles just
+# like the /usr/bin -> /opt front-end symlinks handled above; its documented home is
+# the settings env block, so a shell export (bound here) is the uncommon case.
+# Only the executable is bound, not its parent dir: over-broad for a wrapper in
+# ~/bin, and a launcher needing sibling files can be exposed with -m.
+_bind_if_exists "${CLAUDE_CODE_SHELL_PREFIX%%[[:space:]]*}" f ro-bind
+_bind_if_exists "${CLAUDE_CODE_PROCESS_WRAPPER%%[[:space:]]*}" f ro-bind
+
 # Additional mount points
 for mount_spec in "${mount_args[@]}"; do
     # Check for :rw suffix (read-write mode)
@@ -1301,6 +1322,10 @@ claude_env_vars=(
     OTEL_METRICS_INCLUDE_SESSION_ID OTEL_METRICS_INCLUDE_VERSION OTEL_METRICS_INCLUDE_ACCOUNT_UUID
     OTEL_METRICS_INCLUDE_ENTRYPOINT OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES
     OTEL_RESOURCE_ATTRIBUTES OTEL_LOG_RAW_API_BODIES
+    # Standard OTel SDK attribute-length caps (Claude Code 2.1.214+); the per-signal
+    # LOGRECORD/SPAN variants are read the same way.
+    OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT
+    OTEL_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT
     TRACEPARENT TRACESTATE
     # Bash / shell tool tunables
     BASH_DEFAULT_TIMEOUT_MS BASH_MAX_OUTPUT_LENGTH BASH_MAX_TIMEOUT_MS

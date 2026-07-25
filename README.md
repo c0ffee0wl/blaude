@@ -221,7 +221,7 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 | **GitHub** (requires `--git`) | `GH_TOKEN`, `GITHUB_TOKEN` |
 | **GPG** (socket bound under `--git`) | `GPG_TTY`, `GNUPGHOME` |
 | **MCP standards** | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MCP_CONNECT_TIMEOUT_MS`, `MCP_ENABLED`, `MCP_OAUTH_CALLBACK_PORT`, `MCP_CLIENT_SECRET`, `MCP_SSE_URL`, `ENABLE_TOOL_SEARCH`, `ENABLE_CLAUDEAI_MCP_SERVERS`, `MCP_CONNECTION_NONBLOCKING`, `MCP_SERVER_*` (glob; covers env-based `MCP_SERVER_<ID>` server config and `MCP_SERVER_CONNECTION_BATCH_SIZE`), `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` |
-| **OpenTelemetry** | `OTEL_*` (full set: exporter config, OTLP endpoints/protocols for metrics/logs/traces, client cert/key, log level toggles incl. `OTEL_LOG_RAW_API_BODIES`, resource attributes, etc.), `TRACEPARENT`, `TRACESTATE` |
+| **OpenTelemetry** | `OTEL_*` — enumerated, not prefix-matched (exporter config, OTLP endpoints/protocols for metrics/logs/traces, client cert/key, log level toggles incl. `OTEL_LOG_RAW_API_BODIES`, resource attributes, attribute-length limits incl. the `LOGRECORD`/`SPAN` variants), `TRACEPARENT`, `TRACESTATE` |
 | **Bash / shell** | `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_OUTPUT_LENGTH`, `BASH_MAX_TIMEOUT_MS` |
 | **Tokens & retries** | `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, `MAX_STRUCTURED_OUTPUT_RETRIES`, `TASK_MAX_OUTPUT_LENGTH`, `SLASH_COMMAND_TOOL_CHAR_BUDGET`, `API_TIMEOUT_MS`, `API_FORCE_IDLE_TIMEOUT`, `FALLBACK_FOR_ALL_PRIMARY_MODELS` |
 | **Network/TLS** | `HTTP_PROXY`, `HTTPS_PROXY`, `SOCKS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `USE_BUILTIN_CA_BUNDLE`, `USE_SYSTEM_CA`, `NODE_TLS_REJECT_UNAUTHORIZED` |

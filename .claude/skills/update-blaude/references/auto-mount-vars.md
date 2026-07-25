@@ -15,6 +15,8 @@ Some env vars point to files or directories that must be bind-mounted into the s
 | `CLAUDE_CLIENT_PRESENCE_FILE` | `--ro-bind` (read-only) | File exists on host (Remote Control screen-lock marker, 2.1.181+) |
 | `CLAUDE_SKILL_DIR` | `--ro-bind` (read-only) | Directory exists on host |
 | `CLAUDE_PLUGIN_DATA`, `CLAUDE_CODE_WORKSPACE_DIR`, `CLAUDE_LOGS_DIR`, `CLAUDE_MCP_STDERR_LOG_DIR`, `CLAUDE_SESSION_METADATA_DIR`, `CLAUDE_CODE_WORKSPACE_STATE_DIR` | `--bind` (read-write) | Directory exists on host (custom overrides; defaults live under the already-mounted `~/.claude`). No longer on the env-vars docs page as of 2.1.206 — kept for back-compat |
+| `CLAUDE_CODE_SHELL_PREFIX` | `--ro-bind` (read-only) | Set; value is an argv **prefix**, so only the first whitespace-delimited token (the executable) is bound. Wraps every Bash call, hook, status line, and stdio MCP startup |
+| `CLAUDE_CODE_PROCESS_WRAPPER` | `--ro-bind` (read-only) | Same argv-prefix handling (2.1.208). Canonically under `/opt`, which blaude builds as an empty `--dir`. Documented usage sets it in the settings `env` block, not as a shell export |
 | `AWS_WEB_IDENTITY_TOKEN_FILE` | `--ro-bind` (read-only) | File exists on host |
 | `NODE_EXTRA_CA_CERTS` | `--ro-bind` (read-only) | File exists on host |
 | `SSH_AUTH_SOCK` | `--bind` (read-write) on parent dir | Socket exists, `--ssh` flag (parent dir is bound so the socket survives systemd-tmpfile rotation) |
