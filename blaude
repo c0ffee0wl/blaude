@@ -293,7 +293,7 @@ required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted"
 have_jq=""  # lazy: probed on first merge_config_flags fallthrough
 
 merge_config_flags() {
-    local file="$1" dir="${1%/*}" tmp
+    local file="$1" dir="${1%/*}"
     [[ -d "$dir" ]] || mkdir -p "$dir"
     # This runs on the HOST, pre-sandbox, with the user's full privileges, but
     # $config_dir is bind-mounted read-write into the sandbox as a *directory* —
@@ -303,9 +303,8 @@ merge_config_flags() {
     # (~/.bashrc, ~/.config/systemd/user/*.service), so:
     #   - refuse a symlink at $file. `! -f` is *true* for a dangling one, so
     #     without this the `echo >` below would create the link's target.
-    #   - never write "${file}.tmp": the name is predictable, so a pre-planted
-    #     symlink there redirects the jq output (which embeds agent-controlled
-    #     JSON verbatim). mktemp is O_EXCL, unguessable, and won't follow.
+    #   - never write the predictable "${file}.tmp": a pre-planted symlink there
+    #     redirects jq's output, which embeds agent-controlled JSON verbatim.
     if [[ -L "$file" ]]; then
         echo "Warning: $file is a symlink — refusing to update it." >&2
         echo "  Replace it with a regular file to let blaude set the onboarding flags." >&2
@@ -325,12 +324,11 @@ merge_config_flags() {
     [[ -z "$have_jq" ]] && { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
     [[ "$have_jq" == true ]] || return
     jq -e '.hasCompletedOnboarding == true and .bypassPermissionsModeAccepted == true' "$file" >/dev/null 2>&1 && return
+    local tmp
     tmp=$(mktemp "$dir/.claude.json.XXXXXX") || return
-    if jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "$tmp"; then
-        mv -f "$tmp" "$file"   # rename, not a write-through: $file is not a symlink
-    else
-        rm -f "$tmp"
-    fi
+    # mv renames rather than writing through, and $file is known not to be a symlink.
+    jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "$tmp" && mv "$tmp" "$file"
+    rm -f "$tmp"   # no-op after a successful rename
 }
 
 # Update both config locations (Claude Code may read from either).
@@ -1069,22 +1067,21 @@ else
         # `.gitconfig -> ~/.ssh/id_rsa` or `.vscode -> ~/.aws` would leak host
         # files the sandbox is specifically designed to exclude.
         #
-        # A symlink *at* the protected name is unprotectable, and skipping it is
-        # not safe: bwrap resolves the bind destination through the link, so the
-        # ro-bind/overlay lands on the target while the link itself stays an
-        # ordinary dentry the sandbox can unlink and replace with a real directory
-        # — reopening the exact hole this list exists to close. (It also silently
-        # makes writes to the target ephemeral, discarding legitimate edits.)
-        # There is no way to mount onto a symlink, so refuse to launch instead.
+        # A symlink *at* the protected name cannot be protected at all: bwrap has
+        # no way to avoid resolving a bind destination, so the ro-bind/overlay
+        # lands on the link's target while the link itself stays an ordinary
+        # dentry. Binding it anyway is actively harmful — it silently makes the
+        # *target* write-discarding (a benign `packages/*/.vscode -> shared` loses
+        # real edits) without protecting the name, which the sandbox can still
+        # unlink and replace. So skip it and say so. Residual risk, accepted:
+        # the name remains replaceable, exactly as before this guard existed —
+        # closing that would mean refusing to launch, which breaks legitimate
+        # shared-config symlinks. Use --allow-protected-writes to silence.
         _protected_src_ok() {
             local real
             [[ -n "$resolved_workspace" ]] || return 1   # fail closed: no root, no bind
-            if [[ -L "$1" ]]; then
-                echo "Error: protected path ${1#"$current_dir"/} is a symlink; refusing to launch." >&2
-                echo "  It cannot be protected — replace it with a real file or directory," >&2
-                echo "  or pass --allow-protected-writes to skip protection entirely." >&2
-                exit 1
-            fi
+            [[ -L "$1" ]] && \
+                { echo "Warning: protected path ${1#"$current_dir"/} is a symlink — cannot protect it." >&2; return 1; }
             real=$(readlink -f "$1" 2>/dev/null) || return 1
             [[ "$real" == "$resolved_workspace" || "$real" == "$resolved_workspace"/* ]] && return 0
             _dbg "Skipping protection for $1 (resolves to $real, outside workspace)"
@@ -1099,37 +1096,41 @@ else
         # Protection strategy for a single gitdir: protect config + hooks/
         # individually when hooks/ exists; otherwise overlay the whole gitdir to
         # prevent hooks/ creation (also covers config).
+        # Returns non-zero when it overlaid the whole gitdir, so callers know
+        # everything beneath it is already covered.
         _protect_gitdir() {
             if [[ -d "$1/hooks" ]]; then
                 [[ -f "$1/config" ]] && _protect_file "$1/config" "$2/config"
                 _protect_dir "$1/hooks" "$2/hooks"
-            else
-                _protect_dir "$1" "$2"
+                return 0
             fi
+            _protect_dir "$1" "$2"
+            return 1
         }
         # .git protection, shared by the top-level and nested passes. Submodules
         # keep their real gitdir at .git/modules/<name>/ — arbitrarily nested for a
         # submodule in a subdir or a submodule of a submodule — so their config and
         # hooks/ sit far past the nested scan's maxdepth, and <sub>/.git is a
-        # gitlink *file* that `-d`/`-type d` never match. Those paths execute on the
-        # host exactly like the top-level ones: core.fsmonitor set in a submodule
-        # config fires on a plain `git status` in the superproject, since git
-        # recurses to compute submodule dirtiness. Walk them by their HEAD file
-        # (every gitdir has one; this also picks up modules/*/worktrees/*).
-        # Skipped when the whole gitdir was overlaid above — that already covers it.
+        # gitlink *file* that `-d`/`-type d` never match. They execute on the host
+        # just like the top-level ones: core.fsmonitor in a submodule config fires
+        # on a plain `git status` in the superproject, which recurses to compute
+        # submodule dirtiness. Enumerate gitdir roots by their config file —
+        # nothing else under a gitdir is named `config`, and it's the file we
+        # protect anyway. Pruning the three big subtrees keeps the
+        # walk off the object store, which otherwise dominates: 40 submodules 59ms
+        # -> 22ms, one repo with 30k loose objects 57ms -> 6ms (far worse on WSL2
+        # /mnt). maxdepth can't substitute — nesting makes gitdir depth unbounded,
+        # and a submodule HEAD sits at the same depth as the parent's loose objects.
         _protect_git() {
-            _protect_gitdir "$1" "$2"
-            [[ -d "$1/hooks" && -d "$1/modules" ]] || return
-            local _gd _rel
-            while IFS= read -r -d '' _gd; do
-                _gd="${_gd%/HEAD}"
-                # HEAD also names the reflog (logs/HEAD) and a remote's default ref
-                # (refs/remotes/*/HEAD); overlaying those would silently discard
-                # submodule reflog and fetch updates. Keep only real gitdir roots.
-                [[ -d "$_gd/objects" || -f "$_gd/config" ]] || continue
-                _rel="${_gd#"$1"/}"
-                _protect_gitdir "$_gd" "$2/$_rel"
-            done < <(find "$1/modules" -mindepth 2 -type f -name HEAD -print0 2>/dev/null)
+            _protect_gitdir "$1" "$2" || return   # whole gitdir overlaid: modules/ included
+            [[ -d "$1/modules" ]] || return
+            local gd
+            while IFS= read -r -d '' gd; do
+                gd="${gd%/config}"
+                _protect_gitdir "$gd" "$2/${gd#"$1"/}"
+            done < <(find "$1/modules" -mindepth 2 \
+                         \( -type d \( -name objects -o -name refs -o -name logs \) -prune \) \
+                         -o \( -type f -name config -print0 \) 2>/dev/null)
         }
 
         for f in "${_protected_dotfiles[@]}"; do
@@ -1141,24 +1142,11 @@ else
 
         # .claude/ left writable — skills and agents need to be modifiable
 
-        # Protecting these only when present left the common case wide open: in a
-        # repo without .vscode/, the sandbox could create it and write settings.json
-        # — and executable-path settings (git.path, python.defaultInterpreterPath,
-        # npm.bin) run on the host when the folder is opened. Workspace Trust barely
-        # helps, since the agent writes into a folder the user already trusts. So
-        # shadow the name with an empty tmpfs when it's absent: creation inside the
-        # sandbox succeeds but is discarded. Cost is one empty host stub dir (bwrap
-        # makes the mountpoint through the workspace bind) — the same trade-off
-        # already taken for a missing ~/.config/git. A dangling symlink is left
-        # alone; mounting onto it would resolve to the target.
-        for _pdir in .vscode .idea; do
-            if [[ -d "$current_dir/$_pdir" ]]; then
-                _protect_dir "$current_dir/$_pdir" "$workspace/$_pdir"
-            elif [[ ! -e "$current_dir/$_pdir" && ! -L "$current_dir/$_pdir" ]]; then
-                bwrap_args+=(--tmpfs "$workspace/$_pdir")
-            fi
-        done
-        unset _pdir
+        # Only when present: no overlayable parent at the workspace root, and a
+        # tmpfs shadow would leave an empty stub in every project (bwrap has to
+        # materialize the mountpoint through the workspace bind).
+        [[ -d "$current_dir/.vscode" ]] && _protect_dir "$current_dir/.vscode" "$workspace/.vscode"
+        [[ -d "$current_dir/.idea" ]]   && _protect_dir "$current_dir/.idea" "$workspace/.idea"
 
         # Same protection for nested protected paths (monorepos, git submodules,
         # vendored deps). mindepth 2 skips the top-level (already done above).
