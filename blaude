@@ -941,9 +941,23 @@ fi
 # CLAUDE_CLIENT_PRESENCE_FILE (2.1.181): prefix-match passes the value, but it
 # names a marker file claude reads (screen-lock status for Remote Control mobile
 # push) — bind it read-only so the path resolves inside the sandbox.
+# The OTEL_EXPORTER_OTLP_*CLIENT_KEY/CERTIFICATE pairs are the grpc OTLP mTLS
+# credentials (the http/protobuf path uses CLAUDE_CODE_CLIENT_CERT/KEY instead),
+# and OTEL_EXPORTER_OTLP_CERTIFICATE is the collector's CA bundle. Passing the
+# values without binding the files leaves the exporter pointed at paths that
+# don't exist in the sandbox.
+# CLAUDE_CODE_SHELL names the bash/zsh binary for the Bash tool; a host path
+# such as /opt/homebrew/bin/bash would dangle under blaude's empty /opt. Claude
+# Code falls back to auto-detection on an unusable value, so this only avoids
+# silently ignoring the user's choice.
 for var in CLAUDE_ENV_FILE CLAUDE_CODE_CLIENT_CERT CLAUDE_CODE_CLIENT_KEY \
            AWS_WEB_IDENTITY_TOKEN_FILE NODE_EXTRA_CA_CERTS \
-           GOOGLE_APPLICATION_CREDENTIALS CLAUDE_CLIENT_PRESENCE_FILE; do
+           GOOGLE_APPLICATION_CREDENTIALS CLAUDE_CLIENT_PRESENCE_FILE \
+           CLAUDE_CODE_SHELL \
+           OTEL_EXPORTER_OTLP_CLIENT_KEY OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE \
+           OTEL_EXPORTER_OTLP_CERTIFICATE \
+           OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY \
+           OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE; do
     _bind_env_path "$var" f ro-bind
 done
 
@@ -1311,11 +1325,19 @@ unset _kv
 # breaking blaude -c, TEAM_NAME is the parent's agent-team membership,
 # REMOTE/REMOTE_SESSION_ID the parent's claude.ai cloud-session
 # identity, EFFORT the parent turn's effort level, PROJECT_DIR the
-# parent's cwd). When blaude is invoked from inside another claude
-# session, the ANTHROPIC_*/CLAUDE_* prefix passthrough would silently
-# inherit these into the sandboxed inner claude — wrong identity, wrong
-# paths (outer binary not reachable inside the sandbox), conflated
-# session telemetry. Force-unset so inner claude starts clean.
+# parent's cwd, MESSAGING_SOCKET the parent's cross-session inbox socket
+# (2.1.224) and PID its process ID (2.1.214)). When blaude is invoked
+# from inside another claude session, the ANTHROPIC_*/CLAUDE_* prefix
+# passthrough would silently inherit these into the sandboxed inner
+# claude — wrong identity, wrong paths (outer binary not reachable
+# inside the sandbox), conflated session telemetry. Force-unset so inner
+# claude starts clean. Both new markers are re-exported by the inner
+# claude for its own subprocesses, so unsetting them is mainly hygiene —
+# except that MESSAGING_SOCKET's value stays *live* across the boundary
+# (the socket sits under the bind-mounted /tmp), handing sandboxed hooks
+# and Bash commands a writable pointer into the host session's inbox,
+# and PID names an unrelated process once inside the PID namespace,
+# where the Bash tool's pkill self-protection guard reads it.
 _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
     CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
@@ -1323,6 +1345,7 @@ _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_TEAM_NAME
     CLAUDE_CODE_REMOTE CLAUDE_CODE_REMOTE_SESSION_ID
     CLAUDE_EFFORT CLAUDE_PROJECT_DIR
+    CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_PID
 )
 # Remote Control mode: force the telemetry/feature-flag opt-outs absent (so the
 # GrowthBook eligibility check can run) plus the auth vars that block RC — it needs
@@ -1368,7 +1391,7 @@ claude_env_vars=(
     MCP_OAUTH_CALLBACK_PORT MCP_CLIENT_SECRET ENABLE_TOOL_SEARCH
     ENABLE_CLAUDEAI_MCP_SERVERS MCP_CONNECTION_NONBLOCKING
     MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE
-    MCP_SSE_URL
+    MCP_SSE_URL MCP_DISCOVERY_CACHE
     # MCP_SERVER_<SERVER_ID>=<COMMAND> env-based server config — plus the
     # MCP_SERVER_CONNECTION_BATCH_SIZE tunable — are matched by the MCP_SERVER_*
     # glob in the passthrough loop below, so neither is listed explicitly here.
@@ -1379,9 +1402,13 @@ claude_env_vars=(
     OTEL_EXPORTER_OTLP_METRICS_PROTOCOL OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
     OTEL_EXPORTER_OTLP_LOGS_PROTOCOL OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
     OTEL_EXPORTER_OTLP_TRACES_PROTOCOL OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+    # Generic grpc OTLP credentials; the per-signal METRICS_* variants override
+    # them. All five name files — bound read-only in the mTLS loop above.
+    OTEL_EXPORTER_OTLP_CLIENT_KEY OTEL_EXPORTER_OTLP_CLIENT_CERTIFICATE
+    OTEL_EXPORTER_OTLP_CERTIFICATE
     OTEL_EXPORTER_OTLP_METRICS_CLIENT_KEY OTEL_EXPORTER_OTLP_METRICS_CLIENT_CERTIFICATE
     OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE
-    OTEL_METRIC_EXPORT_INTERVAL OTEL_LOGS_EXPORT_INTERVAL
+    OTEL_METRIC_EXPORT_INTERVAL OTEL_LOGS_EXPORT_INTERVAL OTEL_TRACES_EXPORT_INTERVAL
     OTEL_LOG_USER_PROMPTS OTEL_LOG_ASSISTANT_RESPONSES OTEL_LOG_TOOL_DETAILS OTEL_LOG_TOOL_CONTENT
     OTEL_METRICS_INCLUDE_SESSION_ID OTEL_METRICS_INCLUDE_VERSION OTEL_METRICS_INCLUDE_ACCOUNT_UUID
     OTEL_METRICS_INCLUDE_ENTRYPOINT OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES
@@ -1399,7 +1426,9 @@ claude_env_vars=(
     FALLBACK_FOR_ALL_PRIMARY_MODELS
     # Network & TLS
     HTTP_PROXY HTTPS_PROXY SOCKS_PROXY NO_PROXY
-    NODE_EXTRA_CA_CERTS USE_BUILTIN_CA_BUNDLE USE_SYSTEM_CA NODE_TLS_REJECT_UNAUTHORIZED
+    # CLAUDE_CODE_CERT_STORE (bundled,system) superseded the old
+    # USE_BUILTIN_CA_BUNDLE/USE_SYSTEM_CA toggles and rides the CLAUDE_* prefix.
+    NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED
     # Updates & installation toggles
     FORCE_AUTOUPDATE_PLUGINS DISABLE_INSTALLATION_CHECKS DISABLE_UPDATES
     DISABLE_UPGRADE_COMMAND DISABLE_DOCTOR_COMMAND DISABLE_EXTRA_USAGE_COMMAND
