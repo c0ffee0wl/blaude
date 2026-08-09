@@ -8,10 +8,10 @@ Claude Code with `--dangerously-skip-permissions` can execute arbitrary commands
 
 > **What "most of" means**: bwrap is not a security boundary against kernel exploits, `/tmp` is shared with the host by default (use `--clear-tmp` for an isolated tmpfs), and MCP servers plus any directories you bind-mount still have host reach. Treat this as attack-surface reduction, not a zero-trust container.
 
-The sandbox provides:
+The sandbox:
 
-- Isolates filesystem access (tmpfs `$HOME` with writable access to project dir, `~/.claude`, `~/.config`, and package caches; system directories read-only)
-- Protects dangerous files from writes (shell rc files, `.gitconfig`, `.git/hooks/`, `.git/config`, `.vscode/`, `.idea/`, `.mcp.json`, `.ripgreprc` — in the workspace only; override with `--allow-protected-writes`)
+- Isolates filesystem access (tmpfs `$HOME`; the project dir and `~/.claude` stay writable, `~/.config` and the package caches become write-discarding overlays, system directories are read-only)
+- Protects dangerous files from writes (shell rc files, `.gitconfig`, `.git/hooks/`, `.git/config`, `.vscode/`, `.idea/`, `.mcp.json`, `.ripgreprc`, in the workspace only; override with `--allow-protected-writes`)
 - Drops all Linux capabilities (`--cap-drop ALL`)
 - Uses separate namespaces (PID, IPC, UTS, user; plus optional network namespace with `--no-network`)
 - Sanitizes environment variables (`--clearenv` with an explicit passthrough allowlist; disable with `--keep-env`)
@@ -128,22 +128,22 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 |------|--------|---------|
 | `/usr`, `/lib*`, `/bin`, `/etc` | read-only | System binaries and libraries |
 | `/run/user/<uid>` | tmpfs | Empty XDG runtime dir; `XDG_RUNTIME_DIR` set accordingly. Wayland/PipeWire/D-Bus sockets only appear via opt-in (`--keyring` for D-Bus). |
-| `/tmp` | read-write | Host's /tmp (use `--clear-tmp` for isolated tmpfs) |
+| `/tmp` | read-write | Host's /tmp, minus its IPC socket dirs (see [Host /tmp sockets](#host-tmp-sockets)); use `--clear-tmp` for a fully isolated tmpfs |
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
 | `~/.claude` | read-write | Claude Code config (includes claudechic config) |
-| `~/.config/` | read-write | User config (uv, fabric, google-chrome, etc.) |
+| `~/.config/` | overlay | User config (uv, fabric, google-chrome, etc.): readable, writes discarded on exit |
 | `~/.notebooklm-mcp/`, `~/.notebooklm-mcp-cli/` | read-write | notebooklm-mcp auth and Chrome profile |
 | `~/.claude-mem/` | read-write | Persistent memory across sessions (auto-created if claude-mem plugin is installed) |
 | `~/arxiv-storage/` | read-write | Research paper management tools |
 | `~/.nvm/` | read-only | Node Version Manager (if installed; current node bin added to PATH) |
-| `~/.bun/` | read-only | Bun runtime and packages (`~/.bun/bin` in PATH; `install/cache` gets a tmpfs overlay) |
-| `~/.npm/` | read-write | npm cache bound from host if it exists, otherwise ephemeral scaffold |
+| `~/.bun/` | read-only | Bun runtime and packages (`~/.bun/bin` in PATH; `install/cache` is overlaid: readable, writes discarded) |
+| `~/.npm/` | overlay | npm cache overlaid from host if it exists (readable, writes discarded), otherwise ephemeral scaffold |
 | `~/.local/share/claude`, `~/.local/share/pipx`, `~/.local/share/uv/{tools,python}` | read-only | Claude data and tool-manager venvs |
 | `~/.local/bin` → `/opt/host-bin` | read-only | Host user binaries re-mounted under `/opt/` and added to PATH (the `claude` binary is also bound at its original path) |
 | `~/.cargo/bin` → `/opt/host-cargo-bin`, `~/go/bin` → `/opt/host-go-bin` | read-only | Cargo/Go bins re-mounted under `/opt/` and added to PATH |
-| `/opt/<vendor>/…` (pwsh, Chrome, Chromium, Edge, Brave, dotnet) | read-only | Tools whose `/usr/bin` launcher is a symlink into `/opt` — the install dir is auto-bound so the symlink resolves in-sandbox (the empty `--dir /opt` otherwise shadows it). Only for tools present on the host. Chrome/Chromium need `--no-sandbox` under bwrap; snap installs (resolving to `/snap`) are skipped. |
-| `~/.cache/uv` | read-write | uv cache bound from host if it exists |
-| `~/.cache`, `~/go`, `~/.cargo` | ephemeral | Scaffolded on a tmpfs `$HOME` — cleared on exit |
+| `/opt/<vendor>/…` (pwsh, Chrome, Chromium, Edge, Brave, dotnet) | read-only | Tools whose `/usr/bin` launcher is a symlink into `/opt`. The install dir is auto-bound so the symlink resolves in-sandbox (the empty `--dir /opt` otherwise shadows it). Only for tools present on the host. Chrome/Chromium need `--no-sandbox` under bwrap; snap installs (resolving to `/snap`) are skipped. |
+| `~/.cache/uv` | overlay | uv cache overlaid from host if it exists: readable, writes discarded |
+| `~/.cache`, `~/go`, `~/.cargo` | ephemeral | Scaffolded on a tmpfs `$HOME`, cleared on exit |
 
 ## MCP Server Token Storage
 
@@ -168,14 +168,16 @@ Config file (`~/.claude/.claudechic.yaml`) is writable via the `~/.claude` mount
 
 ## User Config Directory
 
-The entire `~/.config/` directory is mounted read-write if it exists. This includes:
+The entire `~/.config/` directory is mounted as a **write-discarding overlay** if it exists: everything stays readable, and anything the sandbox writes disappears when the session ends. This includes:
 
 - **uv config** (`~/.config/uv/uv.toml`) - Python preference settings (e.g., `python-preference = "system"`)
 - **Fabric** (`~/.config/fabric/`) - Patterns, sessions, contexts, strategies, extensions, OAuth tokens, `.env`
 - **Google Chrome** (`~/.config/google-chrome/`) - Browser profile for automation (Puppeteer, Playwright, OAuth flows)
-- Other tool configurations as needed
+- Anything else your tools keep in `~/.config/`
 
-> **Note:** `~/.config/git/` (the XDG global git config) is the one exception — it is re-shadowed read-only (or as an ephemeral tmpfs if absent) on top of the read-write mount. git settings there (aliases, `core.pager`/`editor`/`fsmonitor`, `core.sshCommand`) execute on the *host* at the next git run outside the sandbox, so the sandbox cannot write them. Override with `--allow-protected-writes`.
+> **Why an overlay, not read-write**: the tree also holds `autostart/`, `systemd/user/`, `environment.d/`, `Code/User/settings.json` and `nvim/init.lua`, each of which executes on the *host* at your next login or next app launch. Read-only isn't an option either: Chrome can't start against a read-only profile and yarn's global installs live in `~/.config/yarn`. An overlay keeps all of those working inside the session while leaving nothing behind. Trade-off: config changes made *by the sandbox* don't persist across runs. Override with `--allow-protected-writes`.
+>
+> `~/.config/git/` (the XDG global git config) is additionally re-shadowed read-only (or as an ephemeral tmpfs if absent) on top. That's redundant under the overlay, but it's what protects you if your `bwrap` is older than 0.8.0 and can't overlay: git settings there (aliases, `core.pager`/`editor`/`fsmonitor`, `core.sshCommand`) execute on the host at the next git run outside the sandbox.
 
 ```bash
 # Setup fabric outside sandbox first
@@ -203,25 +205,25 @@ The directory stores `auth.json` (cookies/CSRF/session) and `chrome-profile/` fo
 
 All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars) are automatically passed through if set:
 
-> **Prefix passthrough**: every `ANTHROPIC_*` and `CLAUDE_*` host env var is auto-passed via the env scanning loop. No matching against a hard-coded list — the Anthropic namespace is owned, so new upstream env vars are picked up automatically. The table below lists representative examples for those rows, not an exhaustive set.
+> **Prefix passthrough**: every `ANTHROPIC_*` and `CLAUDE_*` host env var is auto-passed via the env scanning loop. No matching against a hard-coded list. The Anthropic namespace is owned, so new upstream env vars are picked up automatically. The table below lists representative examples for those rows, not an exhaustive set.
 
-> **Non-prefix passthrough**: rows that don't start with `ANTHROPIC_`/`CLAUDE_` come from blaude's explicit `claude_env_vars` allowlist. Here `*` is a shorthand for a specific enumerated list — e.g. `AWS_*` means `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_BEARER_TOKEN_BEDROCK` — not a wildcard. Variables not in the allowlist won't pass through; use `--env KEY=VALUE` for those.
+> **Non-prefix passthrough**: rows that don't start with `ANTHROPIC_`/`CLAUDE_` come from blaude's explicit `claude_env_vars` allowlist. Here `*` is a shorthand for a specific enumerated list, not a wildcard. For example, `AWS_*` means `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_BEARER_TOKEN_BEDROCK`. Variables not in the allowlist won't pass through; use `--env KEY=VALUE` for those.
 
-> **Forced env-vars**: a small set of variables is hardcoded in the sandbox and overrides the host value (also under `--keep-env`) to keep blaude's auto-skip behaviour working: `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `DISABLE_AUTOUPDATER=1`, `DISABLE_ERROR_REPORTING=1`, `DISABLE_BUG_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `DISABLE_INSTALL_GITHUB_APP_COMMAND=1`, `CLAUDE_DISABLE_CONFIG_WATCH=1`, `DISABLE_GROWTHBOOK=1`. These are kept in a deny-set so the `CLAUDE_*` prefix match cannot resurrect their host values. Additionally, the following are force-*unset* inside the sandbox (via `--unsetenv`): **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`** — any defined value, even `=0`, triggers permission-mode hardening that overrides `--dangerously-skip-permissions` (`"Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set …"`), so blaude drops it to match the documented default (unset = disabled); and **`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`** — markers an outer claude sets automatically (parent binary identity, parent session UUID, parent Remote Control session ID, nested-session flag, agent-team membership, cloud-session identity, parent turn's effort level, parent cwd) that would otherwise leak into the sandboxed inner claude when blaude is invoked from inside another claude session; an inherited `CLAUDE_CODE_CHILD_SESSION=1` would even exclude the session from `--resume`/`--continue`, breaking `blaude -c`.
+> **Forced env-vars**: a small set of variables is hardcoded in the sandbox and overrides the host value (also under `--keep-env`) to keep blaude's auto-skip behaviour working: `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `DISABLE_AUTOUPDATER=1`, `DISABLE_ERROR_REPORTING=1`, `DISABLE_BUG_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `DISABLE_INSTALL_GITHUB_APP_COMMAND=1`, `CLAUDE_DISABLE_CONFIG_WATCH=1`, `DISABLE_GROWTHBOOK=1`. These are kept in a deny-set so the `CLAUDE_*` prefix match cannot resurrect their host values. Additionally, the following are force-*unset* inside the sandbox (via `--unsetenv`): **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`**: any defined value, even `=0`, triggers permission-mode hardening that overrides `--dangerously-skip-permissions` (`"Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set …"`), so blaude drops it to match the documented default (unset = disabled); and **`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`**: markers an outer claude sets automatically (parent binary identity, parent session UUID, parent Remote Control session ID, nested-session flag, agent-team membership, cloud-session identity, parent turn's effort level, parent cwd) that would otherwise leak into the sandboxed inner claude when blaude is invoked from inside another claude session; an inherited `CLAUDE_CODE_CHILD_SESSION=1` would even exclude the session from `--resume`/`--continue`, breaking `blaude -c`.
 
-> **Settings-file blocker detection**: at startup, blaude scans `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json`, `/etc/claude-code/managed-settings.json`, and `/etc/claude-code/managed-settings.d/*.json` for `permissions.disableBypassPermissionsMode: "disable"`. That key blocks `--dangerously-skip-permissions` independently of any env var — and managed (enterprise) settings cannot be overridden by blaude. If detected, a clear warning is printed; remove the key (or change the value) to restore bypass mode.
+> **Settings-file blocker detection**: at startup, blaude scans `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json`, `/etc/claude-code/managed-settings.json`, and `/etc/claude-code/managed-settings.d/*.json` for `permissions.disableBypassPermissionsMode: "disable"`. That key blocks `--dangerously-skip-permissions` independently of any env var, and managed (enterprise) settings cannot be overridden by blaude. If detected, a clear warning is printed; remove the key (or change the value) to restore bypass mode.
 
 | Category | Variables |
 |----------|-----------|
 | **Anthropic namespace (prefix-matched)** | Any variable starting with `ANTHROPIC_` (e.g., `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_BETAS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_*_MODEL*`, `ANTHROPIC_BEDROCK_*`, `ANTHROPIC_FOUNDRY_*`, `ANTHROPIC_VERTEX_*`, `ANTHROPIC_WORKSPACE_ID`, …) |
 | **Claude Code namespace (prefix-matched)** | Any variable starting with `CLAUDE_` (e.g., `CLAUDE_CODE_OAUTH_*`, `CLAUDE_CODE_USE_BEDROCK`/`_VERTEX`/`_FOUNDRY`/`_MANTLE`, `CLAUDE_CODE_MAX_*_TOKENS`, `CLAUDE_CODE_DISABLE_*`, `CLAUDE_CODE_ENABLE_*`, `CLAUDE_CODE_PLUGIN_*`, `CLAUDE_CODE_DEBUG_*`, `CLAUDE_CODE_OTEL_*`, `CLAUDE_CODE_CLIENT_*`, `CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_TMPDIR`, `CLAUDE_ENV_FILE`, `CLAUDE_PLUGIN_DATA`, `CLAUDE_SKILL_DIR`, `CLAUDE_AGENT_SDK_*`, `CLAUDE_EFFORT`, …) |
-| **VERTEX_REGION_* (prefix-matched)** | Region overrides for Claude models on Vertex AI — the whole namespace passes through (`VERTEX_REGION_CLAUDE_<MODEL>`, `VERTEX_REGION_DEFAULT`, `VERTEX_REGION_SMALL_FAST_MODEL`), so new models are covered automatically |
+| **VERTEX_REGION_* (prefix-matched)** | Region overrides for Claude models on Vertex AI. The whole namespace passes through (`VERTEX_REGION_CLAUDE_<MODEL>`, `VERTEX_REGION_DEFAULT`, `VERTEX_REGION_SMALL_FAST_MODEL`), so new models are covered automatically |
 | **AWS** | `AWS_BEARER_TOKEN_BEDROCK`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE` |
 | **Google Cloud** | `GCLOUD_PROJECT`, `GOOGLE_CLOUD_PROJECT`, `GOOGLE_APPLICATION_CREDENTIALS`, `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_API_ENDPOINT`, `CLOUD_RUN_JOB_ATTEMPT`, `CLOUD_ML_REGION` |
 | **GitHub** (requires `--git`) | `GH_TOKEN`, `GITHUB_TOKEN` |
 | **GPG** (socket bound under `--git`) | `GPG_TTY`, `GNUPGHOME` |
 | **MCP standards** | `MCP_TIMEOUT`, `MCP_TOOL_TIMEOUT`, `MCP_CONNECT_TIMEOUT_MS`, `MCP_ENABLED`, `MCP_OAUTH_CALLBACK_PORT`, `MCP_CLIENT_SECRET`, `MCP_SSE_URL`, `MCP_DISCOVERY_CACHE`, `ENABLE_TOOL_SEARCH`, `ENABLE_CLAUDEAI_MCP_SERVERS`, `MCP_CONNECTION_NONBLOCKING`, `MCP_SERVER_*` (glob; covers env-based `MCP_SERVER_<ID>` server config and `MCP_SERVER_CONNECTION_BATCH_SIZE`), `MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE` |
-| **OpenTelemetry** | `OTEL_*` — enumerated, not prefix-matched (exporter config, OTLP endpoints/protocols/export intervals for metrics/logs/traces, generic and per-signal client cert/key plus the collector CA bundle — all bind-mounted read-only, log level toggles incl. `OTEL_LOG_RAW_API_BODIES`, resource attributes, attribute-length limits incl. the `LOGRECORD`/`SPAN` variants), `TRACEPARENT`, `TRACESTATE` |
+| **OpenTelemetry** | `OTEL_*`, enumerated rather than prefix-matched (exporter config, OTLP endpoints/protocols/export intervals for metrics/logs/traces, generic and per-signal client cert/key plus the collector CA bundle, all bind-mounted read-only; log level toggles incl. `OTEL_LOG_RAW_API_BODIES`, resource attributes, attribute-length limits incl. the `LOGRECORD`/`SPAN` variants), `TRACEPARENT`, `TRACESTATE` |
 | **Bash / shell** | `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_OUTPUT_LENGTH`, `BASH_MAX_TIMEOUT_MS` |
 | **Tokens & retries** | `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, `MAX_STRUCTURED_OUTPUT_RETRIES`, `TASK_MAX_OUTPUT_LENGTH`, `SLASH_COMMAND_TOOL_CHAR_BUDGET`, `API_TIMEOUT_MS`, `API_FORCE_IDLE_TIMEOUT`, `FALLBACK_FOR_ALL_PRIMARY_MODELS` |
 | **Network/TLS** | `HTTP_PROXY`, `HTTPS_PROXY`, `SOCKS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED` (CA-store selection is now `CLAUDE_CODE_CERT_STORE`, covered by the `CLAUDE_` prefix) |
@@ -232,7 +234,7 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 | **Third-party Services** | `FEEDLY_ACCESS_TOKEN`, `RAINDROP_ACCESS_TOKEN` |
 | **claudechic** | `CLAUDECHIC_DEBUG`, `CLAUDECHIC_REMOTE_PORT`, `CHIC_PROFILE`, `CHIC_SAMPLE_THRESHOLD` |
 | **notebooklm-mcp** | `NOTEBOOKLM_COOKIES`, `NOTEBOOKLM_CSRF_TOKEN`, `NOTEBOOKLM_SESSION_ID`, `NOTEBOOKLM_MCP_*` |
-| **claude-mem** | Any variable starting with `CLAUDE_MEM_` (covered by the `CLAUDE_*` prefix match — e.g., `CLAUDE_MEM_DATA_DIR`, `CLAUDE_MEM_WORKER_PORT`) |
+| **claude-mem** | Any variable starting with `CLAUDE_MEM_` (covered by the `CLAUDE_*` prefix match, e.g. `CLAUDE_MEM_DATA_DIR`, `CLAUDE_MEM_WORKER_PORT`) |
 | **Webhooks** | Any variable ending in `_WEBHOOK` (e.g., `SLACK_WEBHOOK`, `DISCORD_WEBHOOK`) |
 | **Webshare** | Any variable starting with `WEBSHARE_` (e.g., `WEBSHARE_API_KEY`, `WEBSHARE_PROXY`) |
 
@@ -240,12 +242,12 @@ Use `--env KEY=VALUE` to pass additional variables not covered above.
 
 ## Protected Workspace Paths
 
-Inspired by Anthropic's [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime), blaude write-protects files and directories inside the workspace that could be used to execute code *outside* the sandbox. A sandboxed agent running with `--dangerously-skip-permissions` has full write access to the workspace — without this protection, it could plant a malicious `.git/hooks/pre-commit` or `.bashrc` that runs the next time you open a shell or make a commit on the host.
+Inspired by Anthropic's [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime), blaude write-protects files and directories inside the workspace that could be used to execute code *outside* the sandbox. A sandboxed agent running with `--dangerously-skip-permissions` has full write access to the workspace. Without this protection, it could plant a malicious `.git/hooks/pre-commit` or `.bashrc` that runs the next time you open a shell or make a commit on the host.
 
 sandbox-runtime enforces this using ripgrep-based scanning with `/dev/null` overlays and symlink neutralization. blaude uses a similar technique adapted for its bash/bwrap architecture, with zero host filesystem artifacts:
 
 - **Existing files**: `--ro-bind` from host (preserves content, blocks writes)
-- **Existing directories**: `--tmp-overlay` (content readable, writes succeed but are ephemeral — never reach host). Requires bwrap ≥ 0.8.0; older bwrap falls back to `--ro-bind`, which still blocks writes but may create host stubs for non-existent targets.
+- **Existing directories**: `--tmp-overlay` (content readable, writes succeed but are ephemeral and never reach the host). Requires bwrap ≥ 0.8.0; older bwrap falls back to `--ro-bind`, which still blocks writes but may create host stubs for non-existent targets.
 - **Non-existent directories**: parent directory is overlaid instead (e.g., if `.git/hooks/` is missing, `.git/` is overlaid to prevent hooks creation)
 - **Root-level dotfiles** (`.bashrc` etc.): only protected if they exist (no parent to overlay; low risk since uncommon in project directories)
 - **Git worktrees**: `.git/*` paths are only protected when `.git` is a directory (not a file, as in worktrees)
@@ -276,6 +278,24 @@ Use `--allow-protected-writes` if you need full workspace access (e.g., developi
 ```bash
 blaude --allow-protected-writes
 ```
+
+## Host /tmp Sockets
+
+`/tmp` is bind-mounted from the host by default, which also exposes the IPC sockets sitting there, and the sandbox runs as the same user that owns them. The sharpest case is tmux: with a live server, `tmux send-keys` types straight into one of your host shells. That's *immediate* host code execution, not the deferred kind the workspace protections guard against. An ssh-agent socket under `/tmp/ssh-XXXX/` would likewise sidestep the `--ssh` opt-in, and `/tmp/dbus-*` would sidestep `--keyring`.
+
+blaude shadows each of these with an empty tmpfs, so the sandbox sees the directory but can't reach the host's sockets:
+
+| Path | Risk |
+|------|------|
+| `/tmp/.X11-unix` | X11 input injection and screen capture |
+| `/tmp/.ICE-unix`, `/tmp/.XIM-unix`, `/tmp/.font-unix` | X session manager and input-method channels |
+| `/tmp/tmux-*` | `tmux send-keys` into a host shell: direct command execution |
+| `/tmp/ssh-*` | ssh-agent hijacking, bypassing `--ssh` |
+| `/tmp/dbus-*` | Session bus access, bypassing `--keyring` |
+
+blaude only shadows directories that already exist, since creating the mountpoint for an absent one would leave a real directory behind on your host. It skips the shadows entirely under `--clear-tmp` (already isolated) and `--allow-protected-writes`.
+
+> **Two gaps this doesn't close**: bare socket *files* at the `/tmp` root (`/tmp/.s.PGSQL.5432`, `/tmp/mysql.sock`) can't be shadowed by a tmpfs without covering `/tmp` itself, and a tmux server you start *after* launching blaude creates its socket directory mid-session, unshadowed. Use `--clear-tmp` for a private tmpfs `/tmp` if either matters to you. It closes both, at the cost of not sharing files through `/tmp`.
 
 ## Clipboard Support
 
@@ -316,8 +336,8 @@ profile bwrap /usr/bin/bwrap flags=(unconfined) {
 }
 ```
 
-You only need to run this once. The fix is idempotent — running it again is a no-op.
+You only need to run this once. The fix is idempotent, so running it again is a no-op.
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).

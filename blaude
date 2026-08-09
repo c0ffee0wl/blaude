@@ -123,7 +123,12 @@ no_clipboard=false
 # printing avoids the $(...) fork on every cache hit.
 # Optional 3rd arg: invalidate cache when that path is newer (stat via bash -nt,
 # no fork) — used by callers whose answer can change when a binary is upgraded.
+# A compute fn that could not actually determine the answer sets
+# _CACHED_BOOL_NOCACHE=true; its guess is then used for this run only, never
+# persisted. Without that, one failed probe would freeze a wrong answer in place
+# until the invalidate_path's mtime happened to change.
 _CACHED_BOOL_RESULT=""
+_CACHED_BOOL_NOCACHE=false
 _cached_bool() {
     local key="$1" compute_fn="$2" invalidate_path="${3:-}"
     local cache="${_cache_dir}/${key}-${_host_uid}"
@@ -132,7 +137,9 @@ _cached_bool() {
         IFS= read -r _CACHED_BOOL_RESULT < "$cache"
         return
     fi
+    _CACHED_BOOL_NOCACHE=false
     "$compute_fn"
+    [[ "$_CACHED_BOOL_NOCACHE" == true ]] && return
     printf '%s\n' "$_CACHED_BOOL_RESULT" > "$cache" 2>/dev/null || true
 }
 
@@ -149,6 +156,40 @@ _detect_wsl() {
 }
 _cached_bool wsl _detect_wsl
 wsl_mode=$_CACHED_BOOL_RESULT
+
+# Overlay support was added in bwrap 0.8.0. Probed once here — ahead of every
+# mount decision — because both the protected-paths section and the host-state
+# mounts below (~/.config, npm/uv/bun caches) choose their strategy from it.
+# _cached_bool's mtime invalidation is keyed on the bwrap binary, so an upgrade
+# takes effect immediately without forking `bwrap --help` on every launch;
+# probe $_bwrap_bin rather than a bare `bwrap` so the two agree on which binary.
+#
+# Distinguish "bwrap answered, and the flag isn't there" from "bwrap didn't
+# answer". Only the first is a fact about this host worth persisting: a real
+# 0.7.x stays 0.7.x until upgraded, and an upgrade bumps the mtime that
+# invalidates the cache. A failed probe — bwrap blocked by an outer sandbox,
+# killed, or silent for any other reason — is a transient accident, and caching
+# its "false" would silently downgrade ~/.config and the caches to plain
+# read-write binds on every later launch, with nothing to invalidate it. So the
+# guess is used for this run and deliberately not written to disk.
+_overlay_probe_failed=false
+_detect_overlay() {
+    local help status
+    help=$("$_bwrap_bin" --help 2>&1)
+    status=$?
+    if (( status != 0 )) || [[ -z "$help" ]]; then
+        _overlay_probe_failed=true
+        _CACHED_BOOL_RESULT=false
+        _CACHED_BOOL_NOCACHE=true
+        return
+    fi
+    [[ "$help" == *--tmp-overlay* ]] && _CACHED_BOOL_RESULT=true || _CACHED_BOOL_RESULT=false
+}
+_cached_bool overlay _detect_overlay "$_bwrap_bin"
+overlay_supported=$_CACHED_BOOL_RESULT
+# Paths that had to stay host-writable because overlays are unavailable. Listed
+# in one warning just above the --debug/--dry-run command dump near the bottom.
+_overlay_fallback_paths=()
 
 # Find asciinema's PID by walking ancestor processes via /proc.
 _find_asciinema_pid() {
@@ -415,6 +456,38 @@ _ensure_and_bind() {
     [[ -d "$1" ]] || mkdir -p "$1" 2>/dev/null
     _bind_if_exists "$1" d bind
 }
+# Mount a host directory so its contents stay readable but writes are discarded
+# on exit — for host state the agent should read but never durably change
+# (~/.config, the npm/uv/bun caches). Read-only would be simpler but breaks real
+# use: yarn globals live under ~/.config/yarn, ~/.config/google-chrome is a
+# browser profile Chrome can't start against read-only, and a read-only cache
+# makes npm/uv installs fail rather than degrade.
+#
+# fallback: what to emit when bwrap predates 0.8.0 and can't overlay —
+#   bind  (default) keep today's read-write behaviour, no regression
+#   tmpfs            blank writable dir, for callers that are a tmpfs today and
+#                    would otherwise be *newly* exposed by a bind fallback
+# Only-if-directory, like _bind_if_exists: --tmp-overlay on a missing path makes
+# bwrap materialize the mountpoint, which for a host-bound parent is a host stub.
+_overlay_or_bind() {
+    local path="$1" fallback="${2:-bind}"
+    [[ -d "$path" ]] || return
+    # --allow-protected-writes already means "let the agent write host state".
+    # Checked per call rather than around the call sites: they sit ~300 lines
+    # apart, so one guard here beats four. The workspace protected-paths block
+    # wraps its whole body in the same test instead, because there the call
+    # sites are contiguous — deliberate twins, not an inconsistency.
+    if [[ "$allow_protected_writes" == true ]]; then
+        _bind_if_exists "$path" d bind
+    elif [[ "$overlay_supported" == true ]]; then
+        bwrap_args+=(--overlay-src "$path" --tmp-overlay "$path")
+    elif [[ "$fallback" == tmpfs ]]; then
+        bwrap_args+=(--tmpfs "$path")
+    else
+        _bind_if_exists "$path" d bind
+        _overlay_fallback_paths+=("$path")
+    fi
+}
 _dbg() { [[ "$debug" == true ]] && echo "$@" >&2; }
 
 # Refuse $HOME as mount target or workspace unless --allow-protected-writes.
@@ -541,6 +614,30 @@ if [[ "$clear_tmp_mode" == true ]]; then
     bwrap_args+=(--tmpfs /tmp)
 else
     bwrap_args+=(--bind /tmp /tmp)
+    # The host bind also exposes /tmp's IPC endpoints, which are reachable
+    # because the sandbox runs as the same uid that owns them. A live tmux
+    # server's socket is the sharpest: `tmux send-keys` types into a host shell,
+    # which is immediate host code execution, not the deferred kind the rest of
+    # the sandbox guards against. An ssh-agent socket under /tmp/ssh-XXXX/ is an
+    # opt-out bypass of the --ssh gate, and a /tmp/dbus-* socket bypasses
+    # --keyring the same way. Shadow each with an empty tmpfs; later bwrap_args
+    # override the /tmp bind at these paths.
+    #
+    # Only-if-present is load-bearing: --tmpfs on a missing path makes bwrap
+    # create the mountpoint, and under a host-bound /tmp that is a real host dir.
+    #
+    # Two gaps this deliberately does not close (--clear-tmp is the complete
+    # answer): bare socket *files* at the /tmp root — /tmp/.s.PGSQL.5432,
+    # /tmp/mysql.sock — can't be shadowed by a tmpfs without covering /tmp
+    # itself, and a tmux server started *after* launch creates its socket dir
+    # mid-session, unshadowed.
+    if [[ "$allow_protected_writes" != true ]]; then
+        for _tmp_sock in /tmp/.X11-unix /tmp/.ICE-unix /tmp/.XIM-unix /tmp/.font-unix \
+                         /tmp/tmux-* /tmp/ssh-* /tmp/dbus-*; do
+            [[ -d "$_tmp_sock" ]] && bwrap_args+=(--tmpfs "$_tmp_sock")
+        done
+        unset _tmp_sock
+    fi
 fi
 bwrap_args+=(
     --tmpfs /var
@@ -606,10 +703,12 @@ if [[ "$keyring_mode" == true ]]; then
     _ensure_and_bind "$keyrings_dir"
 fi
 
-# npm cache: bind host's cache if it exists (for npx-based MCP servers),
-# otherwise seed an ephemeral _cacache subdir.
+# npm cache: overlay the host's cache if it exists (readable, so npx-based MCP
+# servers still resolve offline; writes discarded, so a poisoned _cacache entry
+# can't reach the host's own `npm install`), otherwise seed an ephemeral
+# _cacache subdir.
 if [[ -d "$HOME/.npm" ]]; then
-    _bind_if_exists "$HOME/.npm" d bind
+    _overlay_or_bind "$HOME/.npm"
 else
     bwrap_args+=(--dir "$HOME/.npm" --dir "$HOME/.npm/_cacache")
 fi
@@ -678,8 +777,11 @@ _bind_if_exists "$HOME/.local/share/uv/tools" d ro-bind
 # Bind uv-managed Python installations (some uv tools use these instead of system Python)
 _bind_if_exists "$HOME/.local/share/uv/python" d ro-bind
 
-# uv cache: bind if exists for faster tool installs, else leave ephemeral
-_bind_if_exists "$HOME/.cache/uv" d bind
+# uv cache: overlay if it exists for faster tool installs (writes discarded, so
+# cache poisoning can't reach the host's own uv), else leave ephemeral. uv's
+# default link-mode=hardlink can't hardlink across the overlay into a workspace
+# venv, so it falls back to copying — slower, but it degrades gracefully.
+_overlay_or_bind "$HOME/.cache/uv"
 
 # Resolve symlinks under a package manager directory, find their package roots,
 # and mount them read-only. Also mounts MCP token files read-write for persistence.
@@ -844,15 +946,27 @@ for notebooklm_dir in "$HOME/.notebooklm-mcp" "$HOME/.notebooklm-mcp-cli"; do
 done
 
 # User config directory (~/.config/)
-# Includes uv config (python-preference), fabric, google-chrome, and other tool configs
-_bind_if_exists "$HOME/.config" d bind
-# The rw ~/.config mount above also exposes ~/.config/git/ (XDG global git config)
-# read-write. Settings there — aliases, core.pager/editor/fsmonitor, core.sshCommand —
-# execute on the *host* at the next git run outside the sandbox. Claude Code 2.1.160
-# prompts before writing it, but blaude passes --dangerously-skip-permissions (which
-# bypasses that prompt), so re-shadow it here, mirroring the workspace .gitconfig guard:
+# Includes uv config (python-preference), fabric, google-chrome, and other tool configs.
+# Overlaid rather than bound read-write: the tree also holds autostart/,
+# systemd/user/, environment.d/, Code/User/settings.json and nvim/init.lua, each
+# of which executes on the *host* at next login or next app launch. Claude Code
+# 2.1.160 prompts before such writes, but blaude passes
+# --dangerously-skip-permissions, so bwrap is the only guard. An overlay keeps
+# every consumer working (yarn globals, the Chrome profile, gh's token all stay
+# readable) while discarding the writes, and needs no denylist of dangerous
+# subdirectories.
+_overlay_or_bind "$HOME/.config"
+# ~/.config/git (XDG global git config) holds settings — aliases,
+# core.pager/editor/fsmonitor, core.sshCommand — that execute on the *host* at the
+# next git run outside the sandbox. Claude Code 2.1.160 prompts before writing it,
+# but blaude passes --dangerously-skip-permissions (which bypasses that prompt), so
+# re-shadow it here, mirroring the workspace .gitconfig guard:
 #   existing dir -> read-only (content readable, writes blocked, no host artifact)
 #   missing dir  -> ephemeral tmpfs (blocks host file creation)
+# Redundant while the overlay above is active (writes there are discarded anyway),
+# and kept unconditional precisely so it still holds on the no-overlay fallback
+# path, where ~/.config reverts to a plain rw bind. Two spare bwrap args are
+# cheaper than making this protection depend on another feature's availability.
 if [[ "$allow_protected_writes" != true && -d "$HOME/.config" ]]; then
     if [[ -d "$HOME/.config/git" ]]; then
         bwrap_args+=(--ro-bind "$HOME/.config/git" "$HOME/.config/git")
@@ -881,7 +995,11 @@ _bind_if_exists "$HOME/.claude-mem" d bind
 if [[ -d "$HOME/.bun" ]]; then
     _bind_if_exists "$HOME/.bun" d ro-bind
     # Bun runtime needs writable install cache (plugins like claude-mem run bun install)
-    [[ -d "$HOME/.bun/install/cache" ]] && bwrap_args+=(--tmpfs "$HOME/.bun/install/cache")
+    # Overlay rather than a blank tmpfs so the host cache stays readable (bun no
+    # longer re-downloads every session) while writes are still discarded. Falls
+    # back to the old tmpfs, not a bind, so an overlay-less bwrap can't newly
+    # expose a directory that is hidden today.
+    _overlay_or_bind "$HOME/.bun/install/cache" tmpfs
     # Scan bin/ and global node_modules/ separately to avoid traversing ~/.bun/install/cache
     _mount_linked_packages "bun" "$HOME/.bun" \
         "$HOME/.bun/bin" -type l
@@ -1066,15 +1184,7 @@ else
     # Root-level dotfiles (.bashrc etc.) have no overlayable parent — only protected
     # if they already exist (low risk: uncommon in project directories).
     if [[ "$allow_protected_writes" != true ]]; then
-        # Overlay support added in bwrap 0.8.0. _cached_bool's mtime invalidation
-        # (keyed on the bwrap binary) ensures upgrades take effect immediately
-        # without forking `bwrap --help | grep` on every launch.
-        _detect_overlay() {
-            local help
-            help=$(bwrap --help 2>&1)
-            [[ "$help" == *--tmp-overlay* ]] && _CACHED_BOOL_RESULT=true || _CACHED_BOOL_RESULT=false
-        }
-        _cached_bool overlay _detect_overlay "$_bwrap_bin"
+        # $overlay_supported is probed once near the top of the script.
         # A protected source must resolve — after following any symlink in its
         # path — to a location inside the workspace. Otherwise bwrap's bind would
         # mount the host target's content into the sandbox: a malicious
@@ -1101,7 +1211,7 @@ else
             _dbg "Skipping protection for $1 (resolves to $real, outside workspace)"
             return 1
         }
-        if [[ "$_CACHED_BOOL_RESULT" == true ]]; then
+        if [[ "$overlay_supported" == true ]]; then
             _protect_dir() { _protected_src_ok "$1" || return; bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
             _protect_dir() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
@@ -1531,6 +1641,25 @@ else
 fi
 
 # --- Execute ---
+
+# Overlays unavailable: host state that would normally be write-discarding had to
+# stay writable. Warn rather than fail — blaude always launches. Emitted here,
+# above the --debug/--dry-run command dump and ahead of the warnings further down,
+# because --dry-run exits before those and this one explains the mounts it printed.
+# Covers only the *capability* gap: if overlayfs is supported but refuses to mount
+# on this filesystem (some WSL2 drvfs or NFS homes) bwrap aborts, and
+# --allow-protected-writes is the escape hatch.
+if [[ ${#_overlay_fallback_paths[@]} -gt 0 ]]; then
+    if [[ "$_overlay_probe_failed" == true ]]; then
+        echo "Warning: could not ask $_bwrap_bin whether it supports --tmp-overlay;" >&2
+        echo "  assuming not, for this run only." >&2
+    else
+        echo "Warning: bwrap lacks --tmp-overlay (needs 0.8.0+)." >&2
+    fi
+    echo "  These stay host-writable:" >&2
+    printf '  %s\n' "${_overlay_fallback_paths[@]}" >&2
+    echo "" >&2
+fi
 
 if [[ "$debug" == true ]]; then
     # printf %q emits a shell-safe, copy-pasteable representation for every
