@@ -217,12 +217,12 @@ _find_asciinema_pid() {
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --env)
-            env_args+=("$2")
-            shift 2
-            ;;
-        -m|--mount)
-            mount_args+=("$2")
+        --env|-m|--mount)
+            # Guard before `shift 2`: with the flag as the final argument bash
+            # shifts nothing and returns 1, so $1 would stay put and the loop
+            # would spin forever.
+            [[ $# -ge 2 ]] || { echo "Error: $1 requires a value" >&2; exit 1; }
+            if [[ "$1" == --env ]]; then env_args+=("$2"); else mount_args+=("$2"); fi
             shift 2
             ;;
         --no-network)
@@ -363,12 +363,33 @@ merge_config_flags() {
     contents=$(< "$file")
     [[ "$contents" =~ $re1 && "$contents" =~ $re2 ]] && return
     [[ -z "$have_jq" ]] && { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
-    [[ "$have_jq" == true ]] || return
+    # Say so rather than returning quietly: on a machine without jq this is the
+    # likeliest reason the flags never get set, and the only symptom otherwise is
+    # claude re-prompting for onboarding every launch. Fires only when the flags
+    # are actually missing — the regex pre-check above returns first once set.
+    [[ "$have_jq" == true ]] || {
+        echo "Warning: jq not installed — cannot set the onboarding flags in $file." >&2
+        echo "  claude may prompt for onboarding; install jq or complete it once by hand." >&2
+        return
+    }
     jq -e '.hasCompletedOnboarding == true and .bypassPermissionsModeAccepted == true' "$file" >/dev/null 2>&1 && return
     local tmp
     tmp=$(mktemp "$dir/.claude.json.XXXXXX") || return
+    # `.[0] | if type == "object"` repairs a file holding nothing, `null`, or a
+    # non-object: -s wraps the input in an array, so an empty file yields [] and
+    # .[0] is null, and `null * {...}` is a hard jq error. Without the guard the
+    # merge fails, the flags are never written, and claude stops at the onboarding
+    # prompt on every launch with no explanation. The sandbox can reach this file
+    # ($config_dir is bind-mounted rw), so a truncated write must stay repairable.
     # mv renames rather than writing through, and $file is known not to be a symlink.
-    jq -s '.[0] * .[1]' "$file" <(echo "$required_flags") > "$tmp" && mv "$tmp" "$file"
+    if jq -s --argjson flags "$required_flags" \
+         '(.[0] | if type == "object" then . else {} end) * $flags' "$file" > "$tmp" \
+       && [[ -s "$tmp" ]]; then
+        mv "$tmp" "$file"
+    else
+        echo "Warning: could not update $file (malformed JSON?)." >&2
+        echo "  claude may prompt for onboarding until it is fixed or removed." >&2
+    fi
     rm -f "$tmp"   # no-op after a successful rename
 }
 
@@ -574,28 +595,31 @@ _bind_if_exists /sbin d ro-bind
 # to e.g. /run/systemd/resolve/stub-resolv.conf, we need to create that target path
 # See: https://github.com/containers/bubblewrap/issues/390
 # Note: The actual symlink target mount is added AFTER base args (--tmpfs /run) below
-_blaude_cleanup() {
-    [[ -n "$resolv_tmp" ]] && rm -f "$resolv_tmp"
-}
-trap '_blaude_cleanup' EXIT
-
 resolv_symlink_target=""
-resolv_tmp=""
+resolv_fd=""
 _setup_resolv() {
     [[ -L /etc/resolv.conf ]] || return
     # readlink (no -f): need the raw link target to distinguish absolute vs relative.
-    local resolv_target
+    local resolv_target content
     resolv_target=$(readlink /etc/resolv.conf)
-    # mktemp: unguessable name, created O_EXCL (no symlink-follow), under the
-    # host-only cache dir rather than the agent-writable /tmp bind.
-    resolv_tmp=$(mktemp "${_cache_dir}/resolv.XXXXXX" 2>/dev/null) || { resolv_tmp=""; return; }
-    if ! cat /etc/resolv.conf > "$resolv_tmp" 2>/dev/null || [[ ! -s "$resolv_tmp" ]]; then
-        rm -f "$resolv_tmp"
-        resolv_tmp=""
-    elif [[ "$resolv_target" == /* ]]; then
-        # Absolute symlink - create target path after --tmpfs /run is added below
-        resolv_symlink_target="$resolv_target"
-    fi
+    # -r first so a dangling symlink returns quietly: no 2>/dev/null on the read,
+    # since that silently defeats the bash file-read optimization (same gotcha as
+    # the settings scan above).
+    [[ -r /etc/resolv.conf ]] || return
+    content=$(</etc/resolv.conf)
+    [[ -n "$content" ]] || return
+    # Carry the content on a file descriptor, not a temp file: bwrap's
+    # --ro-bind-data copies from the fd into its own tmpfs, so there is no host
+    # artifact to secure, no name for the sandbox to attack, and nothing to clean
+    # up. It also sidesteps a lifetime trap — a temp file would have to outlive
+    # `exec` (bwrap opens its --ro-bind source only after replacing us) yet still
+    # be removed eventually. `exec {fd}<` deliberately does not set FD_CLOEXEC, so
+    # the descriptor survives exec, and the osc52-clipboard PTY proxy (execvp, no
+    # fd scrubbing) passes it through as well.
+    # \n restores the trailing newline $(<...) strips.
+    exec {resolv_fd}< <(printf '%s\n' "$content") || { resolv_fd=""; return; }
+    # Absolute symlink - create target path after --tmpfs /run is added below
+    [[ "$resolv_target" == /* ]] && resolv_symlink_target="$resolv_target"
 }
 _setup_resolv
 bwrap_args+=(--ro-bind /etc /etc)
@@ -674,10 +698,10 @@ fi
 if [[ -n "$resolv_symlink_target" ]]; then
     # Create the symlink target directory and mount our content there
     bwrap_args+=(--dir "${resolv_symlink_target%/*}")
-    bwrap_args+=(--ro-bind "$resolv_tmp" "$resolv_symlink_target")
-elif [[ -n "$resolv_tmp" ]]; then
+    bwrap_args+=(--ro-bind-data "$resolv_fd" "$resolv_symlink_target")
+elif [[ -n "$resolv_fd" ]]; then
     # Relative symlink case - bind mount over /etc/resolv.conf
-    bwrap_args+=(--ro-bind "$resolv_tmp" /etc/resolv.conf)
+    bwrap_args+=(--ro-bind-data "$resolv_fd" /etc/resolv.conf)
 fi
 
 # Handle custom temp directory if CLAUDE_CODE_TMPDIR is set
@@ -917,8 +941,7 @@ _mount_host_bin "$HOME/go/bin" host-go-bin
 # DISABLE_AUTOUPDATER=1 is set below, so no write access needed
 _bind_if_exists "$HOME/.local/share/claude" d ro-bind
 
-# Ensure config directory exists on host, then bind-mount (bwrap --bind auto-creates DEST)
-_ensure_and_bind "$config_dir"
+# $config_dir is bound after the ~/.config overlay below — mount order matters.
 
 # Mount ~/.claude.json (OAuth session, MCP servers, preferences, caches)
 _bind_if_exists "$HOME/.claude.json" f bind
@@ -930,7 +953,7 @@ _bind_if_exists "$HOME/.claude.json" f bind
 _bind_if_exists "$HOME/.agents" d ro-bind
 
 # claudechic config file (~/.claude/.claudechic.yaml) is already accessible
-# via the config_dir mount above — do NOT bind-mount it directly, as claudechic
+# via the config_dir mount below — do NOT bind-mount it directly, as claudechic
 # uses atomic writes (os.replace) which fail on bind-mounted files.
 
 # claudechic debug log (only needed if CLAUDECHIC_DEBUG is set)
@@ -974,6 +997,15 @@ if [[ "$allow_protected_writes" != true && -d "$HOME/.config" ]]; then
         bwrap_args+=(--tmpfs "$HOME/.config/git")
     fi
 fi
+
+# Ensure config directory exists on host, then bind-mount (bwrap --bind auto-creates DEST).
+# Must come after the ~/.config overlay above: bwrap applies mounts in argument
+# order, so a CLAUDE_CONFIG_DIR under ~/.config (e.g. ~/.config/claude) bound
+# first would be covered by the parent overlay, and every session, history.jsonl
+# entry, project-trust record and refreshed OAuth credential would land in the
+# tmpfs upper layer and vanish at exit — silently breaking `blaude -c`/--resume
+# and re-prompting for login on every launch.
+_ensure_and_bind "$config_dir"
 
 # arxiv-storage directory (for research paper management tools)
 _bind_if_exists "$HOME/arxiv-storage" d bind
@@ -1238,23 +1270,40 @@ else
         # gitlink *file* that `-d`/`-type d` never match. They execute on the host
         # just like the top-level ones: core.fsmonitor in a submodule config fires
         # on a plain `git status` in the superproject, which recurses to compute
-        # submodule dirtiness. Enumerate gitdir roots by their config file —
-        # nothing else under a gitdir is named `config`, and it's the file we
-        # protect anyway. Pruning the three big subtrees keeps the
-        # walk off the object store, which otherwise dominates: 40 submodules 59ms
-        # -> 22ms, one repo with 30k loose objects 57ms -> 6ms (far worse on WSL2
-        # /mnt). maxdepth can't substitute — nesting makes gitdir depth unbounded,
-        # and a submodule HEAD sits at the same depth as the parent's loose objects.
+        # submodule dirtiness.
         _protect_git() {
             _protect_gitdir "$1" "$2" || return   # whole gitdir overlaid: modules/ included
-            [[ -d "$1/modules" ]] || return
-            local gd
-            while IFS= read -r -d '' gd; do
-                gd="${gd%/config}"
-                _protect_gitdir "$gd" "$2/${gd#"$1"/}"
-            done < <(find "$1/modules" -mindepth 2 \
-                         \( -type d \( -name objects -o -name refs -o -name logs \) -prune \) \
-                         -o \( -type f -name config -print0 \) 2>/dev/null)
+            [[ -d "$1/modules" ]] && _protect_submodule_gitdirs "$1/modules" "$2/modules"
+        }
+        # A submodule's directory under modules/ is its *worktree path*, so the tree
+        # is path segments until a directory holding a `config` file — the gitdir
+        # root, which is then protected exactly like a top-level .git (hence the
+        # mutual recursion through _protect_git, which also descends that gitdir's
+        # own modules/ to reach a submodule of a submodule).
+        #
+        # Stopping at the root is what keeps the walk out of the object store, which
+        # otherwise dominates the cost. It can't be done by name: `src/logs/lib` puts
+        # a real gitdir behind a segment named `logs`, so pruning `objects`/`refs`/
+        # `logs` by name — as this did before — silently skipped protecting it.
+        # Keying on `config` alone is deliberate, and narrower than git's own
+        # is_git_directory() (HEAD + objects/ + refs/): `config` is the file being
+        # protected, so anything holding one must be guarded whether or not it is a
+        # well-formed gitdir. Descending in bash rather than shelling out per
+        # candidate directory keeps it forkless (40 submodules: 9.1ms -> 2.5ms).
+        # Symlinks are skipped, matching find -P's old behaviour and, since the tree
+        # is then acyclic, keeping the recursion terminating.
+        _protect_submodule_gitdirs() {
+            local d name
+            for d in "$1"/* "$1"/.*; do   # second glob catches a dot-prefixed worktree path
+                name="${d##*/}"
+                [[ "$name" == . || "$name" == .. ]] && continue
+                [[ -d "$d" && ! -L "$d" ]] || continue
+                if [[ -f "$d/config" ]]; then
+                    _protect_git "$d" "$2/$name"
+                else
+                    _protect_submodule_gitdirs "$d" "$2/$name"
+                fi
+            done
         }
 
         for f in "${_protected_dotfiles[@]}"; do
@@ -1752,7 +1801,6 @@ fi
 # Both require blaude to stay alive after bwrap exits, so we can't exec.
 if [[ "$wsl_mode" == true || -n "${_asciinema_pid:-}" ]]; then
     _blaude_exit() {
-        _blaude_cleanup
         [[ "$wsl_mode" == true ]] && sync
         [[ -n "${_asciinema_pid:-}" ]] && kill -CONT "$_asciinema_pid" 2>/dev/null
     }
@@ -1762,6 +1810,4 @@ if [[ "$wsl_mode" == true || -n "${_asciinema_pid:-}" ]]; then
     exit $?
 fi
 
-# Clean up temp files before exec (exec replaces the process, so traps won't fire)
-_blaude_cleanup
 exec "${final_cmd[@]}"

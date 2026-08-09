@@ -30,7 +30,7 @@ chmod +x ~/.local/bin/blaude
 
 Requires Claude Code installed and in PATH.
 
-## Drop-in Replacement
+## Drop-in replacement
 
 blaude is a drop-in replacement for `claude`. All arguments not recognized by blaude are passed directly to the Claude Code CLI:
 
@@ -109,6 +109,7 @@ blaude --exec bash
 | `--aws` | Mount `~/.aws` read-only (for Bedrock auth) |
 | `--no-network` | Disable network access |
 | `--keyring` | Enable GNOME Keyring access (for keytar) |
+| `--remote-control` | Prepare the session for [Remote Control](#remote-control), so `/remote-control` works on demand |
 | `--keep-env` | Keep the entire host environment instead of clearing it |
 | `--chic` | Run [claudechic](https://github.com/mrocklin/claudechic) TUI instead of claude |
 | `--tmp` | Run isolated in /tmp |
@@ -122,7 +123,7 @@ blaude --exec bash
 
 All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to claude.
 
-## What's Mounted
+## What's mounted
 
 | Path | Access | Purpose |
 |------|--------|---------|
@@ -145,17 +146,15 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `~/.cache/uv` | overlay | uv cache overlaid from host if it exists: readable, writes discarded |
 | `~/.cache`, `~/go`, `~/.cargo` | ephemeral | Scaffolded on a tmpfs `$HOME`, cleared on exit |
 
-## MCP Server Token Storage
+## MCP server token storage
 
-MCP servers like [ms-365-mcp](https://github.com/softeria/ms-365-mcp-server) need to persist authentication tokens. blaude handles this automatically:
+MCP servers like [ms-365-mcp](https://github.com/softeria/ms-365-mcp-server) need to persist authentication tokens, and blaude arranges that without any setup from you.
 
-- **npm-linked packages**: Token files (`.token-cache.json`, `.selected-account.json`) at package root are mounted read-write
-- **By default**: D-Bus/keytar disabled, forcing file-based storage (more reliable in containers)
-- **With `--keyring`**: Enables GNOME Keyring access for keytar-based storage
+For npm-linked packages, the token files at the package root (`.token-cache.json`, `.selected-account.json`) are mounted read-write. D-Bus and keytar stay disabled by default, which pushes the servers onto file-based storage; that is the more reliable path in containers.
 
-If you have GNOME Keyring properly configured (unlocked at login), use `--keyring` for secure credential storage.
+If you have GNOME Keyring configured and unlocked at login, `--keyring` turns keytar-based storage back on and gives you the more secure option.
 
-## claudechic Support
+## claudechic support
 
 [claudechic](https://github.com/mrocklin/claudechic) is a Python-based TUI wrapper for Claude Code. Use `--chic` to run it inside the sandbox:
 
@@ -166,14 +165,36 @@ blaude --chic -c           # Continue conversation via claudechic
 
 Config file (`~/.claude/.claudechic.yaml`) is writable via the `~/.claude` mount.
 
-## User Config Directory
+## Remote Control
+
+[Remote Control](https://code.claude.com/docs/en/remote-control) lets you drive a local Claude Code session from your phone or a browser. It needs a flag from blaude, because blaude's usual privacy settings switch it off by accident.
+
+Claude Code asks the GrowthBook feature-flag service whether your account may use Remote Control. blaude normally sets `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1` and `DISABLE_GROWTHBOOK=1`, so that request never goes out, and the feature reports `Remote Control is not yet enabled for your account` even on accounts that have it. The flag drops those three opt-outs for one session.
+
+```bash
+blaude --remote-control     # normal session; run /remote-control when you want it
+blaude remote-control       # server mode (claude's own subcommand, passed through)
+```
+
+The two forms behave differently. blaude consumes `--remote-control` instead of passing it on, so claude starts as usual with `--dangerously-skip-permissions` and you switch Remote Control on from inside using `/remote-control`. The bare `remote-control` subcommand reaches claude untouched and without `--dangerously-skip-permissions`, which claude rejects alongside that subcommand. Both run inside the sandbox.
+
+Either form also unsets `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` for the session. Remote Control needs a full-scope claude.ai OAuth session, and a host API key or a narrower token produces the same misleading "not yet enabled" message. claude falls back to your `/login` session, and blaude tells you at startup when it drops either variable.
+
+Two limits come from Claude Code itself, so blaude prints them as notices instead of working around them:
+
+- Telemetry and feature-flag traffic flows while Remote Control is on. You cannot have the feature without it.
+- Remote-driven actions still ask for permission, even though blaude passes `--dangerously-skip-permissions`.
+
+Don't combine this with `--no-network`. Remote Control needs outbound network, and blaude warns if you ask for both.
+
+## User config directory
 
 The entire `~/.config/` directory is mounted as a **write-discarding overlay** if it exists: everything stays readable, and anything the sandbox writes disappears when the session ends. This includes:
 
-- **uv config** (`~/.config/uv/uv.toml`) - Python preference settings (e.g., `python-preference = "system"`)
-- **Fabric** (`~/.config/fabric/`) - Patterns, sessions, contexts, strategies, extensions, OAuth tokens, `.env`
-- **Google Chrome** (`~/.config/google-chrome/`) - Browser profile for automation (Puppeteer, Playwright, OAuth flows)
-- Anything else your tools keep in `~/.config/`
+- uv keeps Python preference settings in `~/.config/uv/uv.toml`, such as `python-preference = "system"`
+- Fabric keeps its patterns, sessions, contexts, strategies, extensions, OAuth tokens and `.env` in `~/.config/fabric/`
+- Chrome's automation profile sits in `~/.config/google-chrome/`, where Puppeteer, Playwright and OAuth flows find it
+- anything else your tools keep in `~/.config/`
 
 > **Why an overlay, not read-write**: the tree also holds `autostart/`, `systemd/user/`, `environment.d/`, `Code/User/settings.json` and `nvim/init.lua`, each of which executes on the *host* at your next login or next app launch. Read-only isn't an option either: Chrome can't start against a read-only profile and yarn's global installs live in `~/.config/yarn`. An overlay keeps all of those working inside the session while leaving nothing behind. Trade-off: config changes made *by the sandbox* don't persist across runs. Override with `--allow-protected-writes`.
 >
@@ -187,7 +208,7 @@ fabric --setup
 blaude --exec fabric -p "summarize"
 ```
 
-## notebooklm-mcp Support
+## notebooklm-mcp support
 
 [notebooklm-mcp](https://github.com/c0ffee0wl/notebooklm-mcp) is an MCP server for NotebookLM. blaude automatically mounts `~/.notebooklm-mcp/` for auth persistence:
 
@@ -201,7 +222,7 @@ blaude
 
 The directory stores `auth.json` (cookies/CSRF/session) and `chrome-profile/` for automatic re-authentication.
 
-## Environment Variables
+## Environment variables
 
 All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars) are automatically passed through if set:
 
@@ -209,9 +230,9 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 
 > **Non-prefix passthrough**: rows that don't start with `ANTHROPIC_`/`CLAUDE_` come from blaude's explicit `claude_env_vars` allowlist. Here `*` is a shorthand for a specific enumerated list, not a wildcard. For example, `AWS_*` means `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_BEARER_TOKEN_BEDROCK`. Variables not in the allowlist won't pass through; use `--env KEY=VALUE` for those.
 
-> **Forced env-vars**: a small set of variables is hardcoded in the sandbox and overrides the host value (also under `--keep-env`) to keep blaude's auto-skip behaviour working: `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `DISABLE_AUTOUPDATER=1`, `DISABLE_ERROR_REPORTING=1`, `DISABLE_BUG_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `DISABLE_INSTALL_GITHUB_APP_COMMAND=1`, `CLAUDE_DISABLE_CONFIG_WATCH=1`, `DISABLE_GROWTHBOOK=1`. These are kept in a deny-set so the `CLAUDE_*` prefix match cannot resurrect their host values. Additionally, the following are force-*unset* inside the sandbox (via `--unsetenv`): **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`**: any defined value, even `=0`, triggers permission-mode hardening that overrides `--dangerously-skip-permissions` (`"Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set …"`), so blaude drops it to match the documented default (unset = disabled); and **`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`**: markers an outer claude sets automatically (parent binary identity, parent session UUID, parent Remote Control session ID, nested-session flag, agent-team membership, cloud-session identity, parent turn's effort level, parent cwd) that would otherwise leak into the sandboxed inner claude when blaude is invoked from inside another claude session; an inherited `CLAUDE_CODE_CHILD_SESSION=1` would even exclude the session from `--resume`/`--continue`, breaking `blaude -c`.
+> **Forced env-vars**: a small set of variables is hardcoded in the sandbox and overrides the host value (also under `--keep-env`) to keep blaude's auto-skip behaviour working: `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `DISABLE_AUTOUPDATER=1`, `DISABLE_ERROR_REPORTING=1`, `DISABLE_BUG_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `DISABLE_INSTALL_GITHUB_APP_COMMAND=1`, `CLAUDE_DISABLE_CONFIG_WATCH=1`, `DISABLE_GROWTHBOOK=1`. These are kept in a deny-set so the `CLAUDE_*` prefix match cannot resurrect their host values. Additionally, the following are force-*unset* inside the sandbox (via `--unsetenv`): **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`**: any defined value, even `=0`, triggers permission-mode hardening that overrides `--dangerously-skip-permissions` (`"Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set …"`), so blaude drops it to match the documented default (unset = disabled); and **`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_PID`**: markers an outer claude sets automatically (parent binary identity, parent session UUID, parent Remote Control session ID, nested-session flag, agent-team membership, cloud-session identity, parent turn's effort level, parent cwd, parent's cross-session inbox socket, parent's PID) that would otherwise leak into the sandboxed inner claude when blaude is invoked from inside another claude session; an inherited `CLAUDE_CODE_CHILD_SESSION=1` would even exclude the session from `--resume`/`--continue`, breaking `blaude -c`. The last two matter beyond hygiene: `CLAUDE_CODE_MESSAGING_SOCKET` stays *live* across the boundary (the socket sits under the bind-mounted `/tmp`), handing sandboxed hooks and Bash commands a writable pointer into the **host** session's inbox, and `CLAUDE_PID` names an unrelated process once inside the PID namespace, where the Bash tool's `pkill` self-protection guard reads it.
 
-> **Settings-file blocker detection**: at startup, blaude scans `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json`, `/etc/claude-code/managed-settings.json`, and `/etc/claude-code/managed-settings.d/*.json` for `permissions.disableBypassPermissionsMode: "disable"`. That key blocks `--dangerously-skip-permissions` independently of any env var, and managed (enterprise) settings cannot be overridden by blaude. If detected, a clear warning is printed; remove the key (or change the value) to restore bypass mode.
+> **Settings-file blocker detection**: at startup, blaude scans `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json`, `/etc/claude-code/managed-settings.json`, `/etc/claude-code/managed-settings.d/*.json`, and the workspace's own `.claude/settings.json` / `.claude/settings.local.json` (the key works from any scope, so a repo can disable bypass mode too; skipped under `--tmp`, where the workspace is never mounted) for `permissions.disableBypassPermissionsMode: "disable"`. That key blocks `--dangerously-skip-permissions` independently of any env var, and managed (enterprise) settings cannot be overridden by blaude. If detected, a clear warning is printed; remove the key (or change the value) to restore bypass mode.
 
 | Category | Variables |
 |----------|-----------|
@@ -240,19 +261,19 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 
 Use `--env KEY=VALUE` to pass additional variables not covered above.
 
-## Protected Workspace Paths
+## Protected workspace paths
 
 Inspired by Anthropic's [sandbox-runtime](https://github.com/anthropic-experimental/sandbox-runtime), blaude write-protects files and directories inside the workspace that could be used to execute code *outside* the sandbox. A sandboxed agent running with `--dangerously-skip-permissions` has full write access to the workspace. Without this protection, it could plant a malicious `.git/hooks/pre-commit` or `.bashrc` that runs the next time you open a shell or make a commit on the host.
 
 sandbox-runtime enforces this using ripgrep-based scanning with `/dev/null` overlays and symlink neutralization. blaude uses a similar technique adapted for its bash/bwrap architecture, with zero host filesystem artifacts:
 
-- **Existing files**: `--ro-bind` from host (preserves content, blocks writes)
-- **Existing directories**: `--tmp-overlay` (content readable, writes succeed but are ephemeral and never reach the host). Requires bwrap ≥ 0.8.0; older bwrap falls back to `--ro-bind`, which still blocks writes but may create host stubs for non-existent targets.
-- **Non-existent directories**: parent directory is overlaid instead (e.g., if `.git/hooks/` is missing, `.git/` is overlaid to prevent hooks creation)
-- **Root-level dotfiles** (`.bashrc` etc.): only protected if they exist (no parent to overlay; low risk since uncommon in project directories)
-- **Git worktrees**: `.git/*` paths are only protected when `.git` is a directory (not a file, as in worktrees)
-- **Nested paths** (monorepos, git submodules, vendored deps): the same protection is applied to matches found by a `find` scan up to depth 3 (e.g. `packages/app/.git/hooks/`, `packages/lib/.bashrc`)
-- **Workspace symlinks**: a pre-flight scan (`find -maxdepth 4 -type l`) warns about symlinks pointing outside the workspace tree and outside known-safe system paths (`/usr`, `/lib*`, `/bin`, `/sbin`, `/etc`, `/proc`, `/sys`, `/dev`). bwrap mounts don't follow these, but combined with `-m ...:rw` they could expose unintended host paths.
+- Files that already exist are `--ro-bind` mounted from the host, which keeps their content readable and blocks writes.
+- Directories that already exist get a `--tmp-overlay`: content stays readable and writes succeed, but they are ephemeral and never reach the host. This needs bwrap 0.8.0 or newer. Older versions fall back to `--ro-bind`, which still blocks writes but may leave host stubs where the target didn't exist.
+- When a protected directory is missing, its parent is overlaid instead. If `.git/hooks/` is absent, `.git/` gets the overlay, so the sandbox cannot create the hooks directory at all.
+- Root-level dotfiles like `.bashrc` are protected only when they already exist, since there is no parent to overlay. The risk is low because they are uncommon in project directories.
+- In git worktrees, `.git/*` paths are protected only when `.git` is a directory rather than a file.
+- Nested copies get the same treatment. A `find` scan up to depth 3 catches monorepos, git submodules and vendored dependencies, so `packages/app/.git/hooks/` and `packages/lib/.bashrc` are covered too.
+- A pre-flight scan (`find -maxdepth 4 -type l`) warns about workspace symlinks that point outside the workspace tree and outside known-safe system paths (`/usr`, `/lib*`, `/bin`, `/sbin`, `/etc`, `/proc`, `/sys`, `/dev`). bwrap mounts don't follow these, but paired with `-m ...:rw` they could expose host paths you didn't intend to share.
 
 ### Protected files
 
@@ -279,7 +300,7 @@ Use `--allow-protected-writes` if you need full workspace access (e.g., developi
 blaude --allow-protected-writes
 ```
 
-## Host /tmp Sockets
+## Host /tmp sockets
 
 `/tmp` is bind-mounted from the host by default, which also exposes the IPC sockets sitting there, and the sandbox runs as the same user that owns them. The sharpest case is tmux: with a live server, `tmux send-keys` types straight into one of your host shells. That's *immediate* host code execution, not the deferred kind the workspace protections guard against. An ssh-agent socket under `/tmp/ssh-XXXX/` would likewise sidestep the `--ssh` opt-in, and `/tmp/dbus-*` would sidestep `--keyring`.
 
@@ -297,7 +318,7 @@ blaude only shadows directories that already exist, since creating the mountpoin
 
 > **Two gaps this doesn't close**: bare socket *files* at the `/tmp` root (`/tmp/.s.PGSQL.5432`, `/tmp/mysql.sock`) can't be shadowed by a tmpfs without covering `/tmp` itself, and a tmux server you start *after* launching blaude creates its socket directory mid-session, unshadowed. Use `--clear-tmp` for a private tmpfs `/tmp` if either matters to you. It closes both, at the cost of not sharing files through `/tmp`.
 
-## Clipboard Support
+## Clipboard support
 
 VTE-based terminals (Terminator, GNOME Terminal, XFCE Terminal) don't support OSC 52 clipboard sequences. Claude Code uses OSC 52 for clipboard operations, so copying silently fails on these terminals.
 
@@ -305,9 +326,9 @@ blaude ships `osc52-clipboard`, a companion script that intercepts OSC 52 sequen
 
 Requires one of: `xclip`, `xsel` (X11), or `wl-copy` (Wayland).
 
-## Asciinema Support
+## Asciinema support
 
-When running inside [asciinema](https://asciinema.org/) (`ASCIINEMA_REC=1`), blaude pauses the recording for the duration of the Claude session. The asciinema process is stopped (SIGSTOP) before the sandbox starts and resumed (SIGCONT) when it exits. The recording continues seamlessly after Claude exits.
+When running inside [asciinema](https://asciinema.org/) (`ASCIINEMA_REC=1`), blaude pauses the recording for the duration of the Claude session. The asciinema process is stopped (SIGSTOP) before the sandbox starts and resumed (SIGCONT) when it exits. The recording picks up again after Claude exits.
 
 blaude finds the asciinema process by walking the `/proc` ancestor chain. If detection fails, the sandbox runs normally without pausing.
 
