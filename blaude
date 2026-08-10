@@ -484,14 +484,26 @@ _ensure_and_bind() {
 # browser profile Chrome can't start against read-only, and a read-only cache
 # makes npm/uv installs fail rather than degrade.
 #
-# fallback: what to emit when bwrap predates 0.8.0 and can't overlay —
-#   bind  (default) keep today's read-write behaviour, no regression
-#   tmpfs            blank writable dir, for callers that are a tmpfs today and
-#                    would otherwise be *newly* exposed by a bind fallback
+# fallback (required): what to emit when bwrap predates 0.8.0 and can't overlay —
+#   bind     keep read-write behaviour, for callers that were rw before overlays
+#            (these land in the writes-persist startup warning)
+#   ro-bind  keep read-only behaviour, for callers upgraded from a plain ro-bind
+#            where a rw fallback would newly expose host state and a tmpfs would
+#            hide content the sandbox depends on
+#   tmpfs    blank writable dir, for callers that were a tmpfs before overlays
+#            and would otherwise be *newly* exposed by a bind fallback
+# Required (no default) and validated eagerly — even on overlay-capable hosts
+# where it isn't consumed — because a typo'd or forgotten fallback that only
+# errored on pre-0.8.0 bwrap would be a latent bug, and a silent default of
+# `bind` would make the *most permissive* mode the accidental outcome.
 # Only-if-directory, like _bind_if_exists: --tmp-overlay on a missing path makes
 # bwrap materialize the mountpoint, which for a host-bound parent is a host stub.
 _overlay_or_bind() {
-    local path="$1" fallback="${2:-bind}"
+    local path="$1" fallback="$2"
+    case "$fallback" in
+        bind|ro-bind|tmpfs) ;;
+        *) echo "_overlay_or_bind: invalid fallback '$fallback' for $path" >&2; exit 1 ;;
+    esac
     [[ -d "$path" ]] || return
     # --allow-protected-writes already means "let the agent write host state".
     # Checked per call rather than around the call sites: they sit ~300 lines
@@ -505,8 +517,10 @@ _overlay_or_bind() {
     elif [[ "$fallback" == tmpfs ]]; then
         bwrap_args+=(--tmpfs "$path")
     else
-        _bind_if_exists "$path" d bind
-        _overlay_fallback_paths+=("$path")
+        _bind_if_exists "$path" d "$fallback"
+        # Only rw fallbacks belong in the writes-persist warning; ro-bind
+        # regresses nothing.
+        [[ "$fallback" == bind ]] && _overlay_fallback_paths+=("$path")
     fi
 }
 _dbg() { [[ "$debug" == true ]] && echo "$@" >&2; }
@@ -732,7 +746,7 @@ fi
 # can't reach the host's own `npm install`), otherwise seed an ephemeral
 # _cacache subdir.
 if [[ -d "$HOME/.npm" ]]; then
-    _overlay_or_bind "$HOME/.npm"
+    _overlay_or_bind "$HOME/.npm" bind
 else
     bwrap_args+=(--dir "$HOME/.npm" --dir "$HOME/.npm/_cacache")
 fi
@@ -791,21 +805,26 @@ _mount_opt_frontend_tools
 # Uses 'e' kind so symlinks to claude are also bound.
 _bind_if_exists "$HOME/.local/bin/claude" e ro-bind
 
-# Bind pipx virtual environments (symlink targets for pipx-installed tools)
-_bind_if_exists "$HOME/.local/share/pipx" d ro-bind
+# pipx virtual environments (symlink targets for pipx-installed tools).
+# Overlaid so in-session `pipx install` works with writes discarded.
+_overlay_or_bind "$HOME/.local/share/pipx" ro-bind
 
-# Bind uv tools directory (for uv-installed MCP servers like notebooklm-mcp)
-# These are symlink targets for tools in ~/.local/bin installed via `uv tool install`
-_bind_if_exists "$HOME/.local/share/uv/tools" d ro-bind
-
-# Bind uv-managed Python installations (some uv tools use these instead of system Python)
-_bind_if_exists "$HOME/.local/share/uv/python" d ro-bind
+# uv tools directory (symlink targets for `uv tool install` shims in
+# ~/.local/bin; uv-installed MCP servers like notebooklm-mcp live here) and
+# uv-managed Python installations (some uv tools use these instead of system
+# Python). Overlaid rather than ro-bound: uv creates a temp file in the tools
+# dir even for read-only operations, so `uv tool list` aborts with "Read-only
+# file system" on a plain ro-bind. A tmpfs fallback would dangle every uv shim
+# in ~/.local/bin. The two subdirs are mounted individually — not the whole
+# ~/.local/share/uv — to keep host exposure to exactly what's needed.
+_overlay_or_bind "$HOME/.local/share/uv/tools" ro-bind
+_overlay_or_bind "$HOME/.local/share/uv/python" ro-bind
 
 # uv cache: overlay if it exists for faster tool installs (writes discarded, so
 # cache poisoning can't reach the host's own uv), else leave ephemeral. uv's
 # default link-mode=hardlink can't hardlink across the overlay into a workspace
 # venv, so it falls back to copying — slower, but it degrades gracefully.
-_overlay_or_bind "$HOME/.cache/uv"
+_overlay_or_bind "$HOME/.cache/uv" bind
 
 # Resolve symlinks under a package manager directory, find their package roots,
 # and mount them read-only. Also mounts MCP token files read-write for persistence.
@@ -895,7 +914,7 @@ nvm_installed=false
 nvm_dir="$HOME/.nvm"
 if [[ -d "$nvm_dir" ]]; then
     nvm_installed=true
-    _bind_if_exists "$nvm_dir" d ro-bind
+    _overlay_or_bind "$nvm_dir" ro-bind
     _mount_linked_packages "npm" "$nvm_dir" \
         "$nvm_dir/versions" -type l -path "*/node_modules/*"
 fi
@@ -910,29 +929,33 @@ fnm_installed=false
 fnm_dir="${FNM_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/fnm}"
 if [[ -d "$fnm_dir" ]]; then
     fnm_installed=true
-    _bind_if_exists "$fnm_dir" d ro-bind
+    _overlay_or_bind "$fnm_dir" ro-bind
     _mount_linked_packages "npm" "$fnm_dir" \
         "$fnm_dir/node-versions" -type l -path "*/node_modules/*"
 fi
 
 # Secondary Node package managers keep global installs / bin shims / caches OUTSIDE
-# the node-manager dir, so the fnm/nvm mounts don't cover them. Mount read-only and
-# (in the PATH section below) wire global bin dirs onto PATH. Gated on existence —
-# tool-agnostic, so this also benefits nvm/bun users.
+# the node-manager dir, so the fnm/nvm mounts don't cover them. Overlaid (readable,
+# writes discarded — like the manager dirs above, so in-session installs and
+# corepack's on-demand downloads of uncached versions work ephemerally) and
+# (in the PATH section below) global bin dirs are wired onto PATH. Gated on
+# existence — tool-agnostic, so this also benefits nvm/bun users.
 # pnpm: bins in $PNPM_HOME/bin; isolated globals + content store under $PNPM_HOME.
 pnpm_home="${PNPM_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/pnpm}"
 if [[ -d "$pnpm_home" ]]; then
-    _bind_if_exists "$pnpm_home" d ro-bind
+    _overlay_or_bind "$pnpm_home" ro-bind
     # `pnpm link --global` / `pnpm add -g <local dir>` symlinks escaping $PNPM_HOME.
     # Scope to global/ — never scan the (huge) content store.
     _mount_linked_packages "npm" "$pnpm_home" \
         "$pnpm_home/global" -type l -path "*/node_modules/*"
 fi
 # corepack: shims live in node's bin (already mounted); real pnpm/yarn cached here.
+# A corepack shim pinned to an *uncached* version downloads into $COREPACK_HOME
+# before it can run at all, so a plain ro-bind broke it outright.
 corepack_home="${COREPACK_HOME:-${XDG_CACHE_HOME:-$HOME/.cache}/node/corepack}"
-_bind_if_exists "$corepack_home" d ro-bind
+_overlay_or_bind "$corepack_home" ro-bind
 # yarn classic global bins (globals in ~/.config/yarn, already rw-mounted).
-_bind_if_exists "$HOME/.yarn" d ro-bind
+_overlay_or_bind "$HOME/.yarn" ro-bind
 
 _mount_host_bin "$HOME/.cargo/bin" host-cargo-bin
 _mount_host_bin "$HOME/go/bin" host-go-bin
@@ -950,6 +973,11 @@ _bind_if_exists "$HOME/.claude.json" f bind
 # ~/.agents/skills/<name>; ~/.claude/skills/<name> is a relative symlink to it.
 # Mount read-only so global-scope skills resolve inside the sandbox (project-scope
 # skills already work — both dirs live in the mounted workspace).
+# Deliberately NOT an overlay, unlike the package-manager dirs: an ephemeral
+# `npx skills` install would write the skill into the discarded upper layer but
+# drop its ~/.claude/skills/<name> symlink into the *persistent* rw ~/.claude
+# mount, leaving a dangling symlink on the host after exit. Failing loudly at
+# install time is better than that split write.
 _bind_if_exists "$HOME/.agents" d ro-bind
 
 # claudechic config file (~/.claude/.claudechic.yaml) is already accessible
@@ -978,7 +1006,7 @@ done
 # every consumer working (yarn globals, the Chrome profile, gh's token all stay
 # readable) while discarding the writes, and needs no denylist of dangerous
 # subdirectories.
-_overlay_or_bind "$HOME/.config"
+_overlay_or_bind "$HOME/.config" bind
 # ~/.config/git (XDG global git config) holds settings — aliases,
 # core.pager/editor/fsmonitor, core.sshCommand — that execute on the *host* at the
 # next git run outside the sandbox. Claude Code 2.1.160 prompts before writing it,
@@ -1025,13 +1053,16 @@ _bind_if_exists "$HOME/.claude-mem" d bind
 
 # Bun runtime and package manager
 if [[ -d "$HOME/.bun" ]]; then
-    _bind_if_exists "$HOME/.bun" d ro-bind
-    # Bun runtime needs writable install cache (plugins like claude-mem run bun install)
-    # Overlay rather than a blank tmpfs so the host cache stays readable (bun no
-    # longer re-downloads every session) while writes are still discarded. Falls
-    # back to the old tmpfs, not a bind, so an overlay-less bwrap can't newly
-    # expose a directory that is hidden today.
-    _overlay_or_bind "$HOME/.bun/install/cache" tmpfs
+    _overlay_or_bind "$HOME/.bun" ro-bind
+    # Bun needs a writable install cache (plugins like claude-mem run bun
+    # install). The ~/.bun overlay (or the --allow-protected-writes rw bind)
+    # already covers it; only the ro-bind fallback path needs the old blank
+    # tmpfs on top — never a bind, which would newly expose host content.
+    # Reading overlay_supported at a call site matches the protected-paths
+    # section, which picks its strategy from the same flag.
+    if [[ "$overlay_supported" != true && "$allow_protected_writes" != true ]]; then
+        _overlay_or_bind "$HOME/.bun/install/cache" tmpfs
+    fi
     # Scan bin/ and global node_modules/ separately to avoid traversing ~/.bun/install/cache
     _mount_linked_packages "bun" "$HOME/.bun" \
         "$HOME/.bun/bin" -type l
