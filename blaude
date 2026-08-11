@@ -117,30 +117,49 @@ chic_mode=false
 clear_tmp_mode=false
 no_clipboard=false
 
-# Cache a boolean result at $_cache_dir/<key>-$UID to avoid repeated
-# proc/help checks. Compute fn must set _CACHED_BOOL_RESULT.
+# Cache a boolean result at $_cache_dir/<key>[<identity-bin, / -> _>]-$UID to
+# avoid repeated proc/help checks. Compute fn must set _CACHED_BOOL_RESULT.
 # Result is returned via the global _CACHED_BOOL_RESULT — assigning instead of
 # printing avoids the $(...) fork on every cache hit.
-# Optional 3rd arg: invalidate cache when that path is newer (stat via bash -nt,
-# no fork) — used by callers whose answer can change when a binary is upgraded.
+# Optional 3rd arg: a binary whose identity the answer depends on. Two
+# mechanisms tie the entry to *which* binary answered: (1) on write, the cache
+# file's mtime is set equal to the binary's (touch -r), and the cache is valid
+# only while the two still match exactly (-nt/-ot both false). Exact match
+# invalidates on replacement in EITHER direction — a plain `-nt` check missed
+# downgrades, because package managers preserve packaged mtimes, so an older
+# build restored at the same path is never "newer than" the cache and its
+# stale answer would be pinned indefinitely. (2) the binary's path is folded
+# into the cache filename, because mtime alone can collide: nix and
+# reproducible-build stores normalize mtimes (e.g. to epoch), so two different
+# binaries can share one. Per-path entries also let two environments alternate
+# without re-probing on every switch — at the accepted cost that a host whose
+# bwrap path keeps changing (per-derivation nix shells) accumulates
+# never-GC'd entries here.
+# touch is gated on the printf succeeding: a failed write can leave an empty
+# file, and stamping *that* would mint a persistently valid empty cache. If
+# touch itself fails, the cache mtime stays "now", which can never equal the
+# binary's, so it degrades to re-probing each launch — correct, just uncached.
 # A compute fn that could not actually determine the answer sets
 # _CACHED_BOOL_NOCACHE=true; its guess is then used for this run only, never
-# persisted. Without that, one failed probe would freeze a wrong answer in place
-# until the invalidate_path's mtime happened to change.
+# persisted. Without that, one failed probe would freeze a wrong answer in
+# place.
 _CACHED_BOOL_RESULT=""
 _CACHED_BOOL_NOCACHE=false
 _cached_bool() {
-    local key="$1" compute_fn="$2" invalidate_path="${3:-}"
-    local cache="${_cache_dir}/${key}-${_host_uid}"
+    local key="$1" compute_fn="$2" identity_bin="${3:-}"
+    local cache="${_cache_dir}/${key}${identity_bin//\//_}-${_host_uid}"
     if [[ -f "$cache" ]] && \
-       { [[ -z "$invalidate_path" ]] || [[ ! "$invalidate_path" -nt "$cache" ]]; }; then
+       { [[ -z "$identity_bin" ]] || \
+         [[ ! "$identity_bin" -nt "$cache" && ! "$identity_bin" -ot "$cache" ]]; }; then
         IFS= read -r _CACHED_BOOL_RESULT < "$cache"
         return
     fi
     _CACHED_BOOL_NOCACHE=false
     "$compute_fn"
     [[ "$_CACHED_BOOL_NOCACHE" == true ]] && return
-    printf '%s\n' "$_CACHED_BOOL_RESULT" > "$cache" 2>/dev/null || true
+    if printf '%s\n' "$_CACHED_BOOL_RESULT" > "$cache" 2>/dev/null && [[ -n "$identity_bin" ]]; then
+        touch -r "$identity_bin" "$cache" 2>/dev/null || true
+    fi
 }
 
 # ${var,,} lowercases — matches `grep -i` semantics without shopt manipulation.
@@ -160,13 +179,14 @@ wsl_mode=$_CACHED_BOOL_RESULT
 # Overlay support was added in bwrap 0.8.0. Probed once here — ahead of every
 # mount decision — because both the protected-paths section and the host-state
 # mounts below (~/.config, npm/uv/bun caches) choose their strategy from it.
-# _cached_bool's mtime invalidation is keyed on the bwrap binary, so an upgrade
-# takes effect immediately without forking `bwrap --help` on every launch;
-# probe $_bwrap_bin rather than a bare `bwrap` so the two agree on which binary.
+# _cached_bool ties the entry to $_bwrap_bin's identity, so an upgrade,
+# downgrade, or PATH-shadowing bwrap takes effect immediately without forking
+# `bwrap --help` on every launch; probe $_bwrap_bin rather than a bare `bwrap`
+# so the two agree on which binary.
 #
 # Distinguish "bwrap answered, and the flag isn't there" from "bwrap didn't
-# answer". Only the first is a fact about this host worth persisting: a real
-# 0.7.x stays 0.7.x until upgraded, and an upgrade bumps the mtime that
+# answer". Only the first is a fact about this binary worth persisting: a real
+# 0.7.x stays 0.7.x until replaced, and replacement changes the mtime that
 # invalidates the cache. A failed probe — bwrap blocked by an outer sandbox,
 # killed, or silent for any other reason — is a transient accident, and caching
 # its "false" would silently downgrade ~/.config and the caches to plain
@@ -185,6 +205,10 @@ _detect_overlay() {
     fi
     [[ "$help" == *--tmp-overlay* ]] && _CACHED_BOOL_RESULT=true || _CACHED_BOOL_RESULT=false
 }
+# Retire the pre-identity-keyed cache name — orphaned by the filename change,
+# never read again. The -e guard keeps the rm fork off every launch but the
+# first after upgrading.
+[[ -e "${_cache_dir}/overlay-${_host_uid}" ]] && rm -f "${_cache_dir}/overlay-${_host_uid}" 2>/dev/null
 _cached_bool overlay _detect_overlay "$_bwrap_bin"
 overlay_supported=$_CACHED_BOOL_RESULT
 # Paths that had to stay host-writable because overlays are unavailable. Listed
@@ -844,6 +868,10 @@ _mount_linked_packages() {
     local cache_file="${_cache_dir}/pkgmount-${label}-${scan_key}-${_host_uid}"
     local -a link_targets=()
 
+    # Loose one-directional -nt — not _cached_bool's exact-match identity
+    # stamp — is deliberate here: a stale list only *misses* newly linked
+    # packages (each cached line is revalidated below, so wrong mounts can't
+    # happen), and `rm ~/.cache/blaude/pkgmount-*` is the documented reset.
     if [[ -f "$cache_file" && ! "$scan_root" -nt "$cache_file" ]]; then
         while IFS= read -r line; do
             # Defense-in-depth: re-verify each cached path is a real package
@@ -1016,8 +1044,13 @@ _overlay_or_bind "$HOME/.config" bind
 #   missing dir  -> ephemeral tmpfs (blocks host file creation)
 # Redundant while the overlay above is active (writes there are discarded anyway),
 # and kept unconditional precisely so it still holds on the no-overlay fallback
-# path, where ~/.config reverts to a plain rw bind. Two spare bwrap args are
-# cheaper than making this protection depend on another feature's availability.
+# path, where ~/.config reverts to a plain rw bind. Known cost, accepted: on
+# that fallback path a missing ~/.config/git means bwrap materializes the
+# tmpfs mountpoint as a real (empty) host directory through the rw parent bind
+# — once, since later launches then take the ro-bind branch. Dropping the
+# tmpfs there instead would let the agent create ~/.config/git/config on the
+# host — strictly worse than an empty dir. Two spare bwrap args are cheaper
+# than making this protection depend on another feature's availability.
 if [[ "$allow_protected_writes" != true && -d "$HOME/.config" ]]; then
     if [[ -d "$HOME/.config/git" ]]; then
         bwrap_args+=(--ro-bind "$HOME/.config/git" "$HOME/.config/git")
