@@ -143,8 +143,23 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `~/.local/bin` → `/opt/host-bin` | read-only | Host user binaries re-mounted under `/opt/` and added to PATH (the `claude` binary is also bound at its original path) |
 | `~/.cargo/bin` → `/opt/host-cargo-bin`, `~/go/bin` → `/opt/host-go-bin` | read-only | Cargo/Go bins re-mounted under `/opt/` and added to PATH |
 | `/opt/<vendor>/…` (pwsh, Chrome, Chromium, Edge, Brave, dotnet) | read-only | Tools whose `/usr/bin` launcher is a symlink into `/opt`. The install dir is auto-bound so the symlink resolves in-sandbox (the empty `--dir /opt` otherwise shadows it). Only for tools present on the host. Chrome/Chromium need `--no-sandbox` under bwrap; snap installs (resolving to `/snap`) are skipped. |
+| managed script dirs | read-only | Directories holding the executables named by `/etc/claude-code/managed-settings.json`. See [Managed settings executables](#managed-settings-executables). Only when they exist and are root-owned. |
 | `~/.cache/uv` | overlay | uv cache overlaid from host if it exists: readable, writes discarded |
 | `~/.cache`, `~/go`, `~/.cargo` | ephemeral | Scaffolded on a tmpfs `$HOME`, cleared on exit |
+
+## Managed settings executables
+
+On an enterprise-managed box, `/etc/claude-code/managed-settings.json` points at scripts on the host: a `PreToolUse` hook, `statusLine.command`, `apiKeyHelper`, and the AWS and OpenTelemetry credential helpers.
+
+`/etc` is bind-mounted read-only, so those settings are visible inside the sandbox. The scripts they name usually are not, because they tend to live under `/opt`, which blaude replaces with an empty directory. The hook is the case that matters most. It is the one enforcement layer that survives `--dangerously-skip-permissions`, which blaude always passes, and when its script is missing it fails quietly: Claude Code reports a hook error on every tool call and then runs the command anyway. A missing `apiKeyHelper` is louder but no better, since the session gets no credential at all.
+
+blaude reads those settings and bind-mounts the directory holding each script read-only, so they keep working. The directory rather than the file alone, so a helper that sources a sibling still resolves.
+
+Only `/etc/claude-code/managed-settings.json` and `/etc/claude-code/managed-settings.d/*.json` are read. Your `~/.claude/settings.json` and the workspace's `.claude/settings.json` are bind-mounted read-write into the sandbox, so a sandboxed agent could plant a hook in one session to widen its own filesystem access in the next; the managed files are out of its reach. Within them, only the keys listed above are read, never the whole file, because `permissions.deny[]` holds paths that are meant to stay unreachable.
+
+A settings file is ignored unless root owns it and it is not group- or world-writable, and every directory it names has to pass the same check. That also means nothing under `$HOME` can be mounted this way.
+
+If blaude warns that it is not mounting a path, ask your administrator to `chown root:root` and `chmod go-w` that directory. Until then the hook or helper does not run inside the sandbox. If it warns that `jq` is missing, install it: blaude cannot read the settings without it.
 
 ## MCP server token storage
 

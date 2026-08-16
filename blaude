@@ -355,7 +355,8 @@ fi
 config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted": true}'
 
-have_jq=""  # lazy: probed on first merge_config_flags fallthrough
+have_jq=""  # lazy: probed by whichever of merge_config_flags /
+            # _mount_managed_config_paths needs jq first
 
 merge_config_flags() {
     local file="$1" dir="${1%/*}"
@@ -1217,6 +1218,98 @@ fi
 # ~/bin, and a launcher needing sibling files can be exposed with -m.
 _bind_if_exists "${CLAUDE_CODE_SHELL_PREFIX%%[[:space:]]*}" f ro-bind
 _bind_if_exists "${CLAUDE_CODE_PROCESS_WRAPPER%%[[:space:]]*}" f ro-bind
+
+# True when <path> exists and, after following symlinks, is owned by uid 0 and is
+# neither group- nor world-writable. -L matters: the check has to describe what
+# actually gets mounted, not a symlink that happens to point at it.
+_root_owned() {
+    local owner perm
+    read -r owner perm < <(stat -Lc '%u %a' "$1" 2>/dev/null) || return 1
+    [[ "$owner" == 0 ]] && (( (8#$perm & 022) == 0 ))
+}
+
+# Same failure as the two binds above, from the other direction: enterprise
+# settings in /etc/claude-code name host executables, and blaude hides them. The
+# sharpest is the PreToolUse hook — on a managed box it is the only enforcement
+# layer that survives --dangerously-skip-permissions, which blaude always passes
+# (permissions.deny[] is skipped in bypass mode; hooks are not). /etc is ro-bound
+# so the *registration* is visible in-sandbox, but the script it names usually
+# sits under /opt, which the empty `--dir /opt` shadows. bash exits 127, Claude
+# Code treats a non-2 exit as a *non-blocking* hook error, and the guard prints an
+# error on every tool call while enforcing nothing. apiKeyHelper fails louder but
+# just as fatally: a dangling helper means no credential at all.
+#
+# Bind the directory holding each script, not the bare file, so a helper that
+# sources a sibling still resolves. (The two binds above take the opposite call
+# deliberately — a wrapper in ~/bin would drag in the whole dir.)
+#
+# Only these enumerated command-valued keys are read, never the whole document: a
+# recursive scan would also hit permissions.deny[], where an entry like
+# `Read(//opt/vendor/.env)` would be mistaken for a path and mount the directory
+# holding the very secret the rule exists to deny.
+#
+# Managed scope only. $config_dir and the workspace's .claude/settings.json are
+# bind-mounted read-write into the sandbox, so harvesting mount paths from them
+# would let a contained agent plant a hook in one session to widen its own
+# filesystem reach in the next — the poisoned-input problem the pkgmount cache
+# re-validates against. /etc/claude-code is out of the sandbox's reach.
+#
+# The per-directory gate doubles as the $HOME guard: anything under $HOME is
+# user-owned, so it can never be bound this way.
+_mount_managed_config_paths() {
+    local f cmd tok dir
+    local -A seen=()
+    local -a files=() toks=()
+    for f in /etc/claude-code/managed-settings.json \
+             /etc/claude-code/managed-settings.d/*.json; do
+        [[ -f "$f" && -r "$f" ]] && _root_owned "$f" && files+=("$f")
+    done
+    # Also guards the jq call below: with no file operands jq would read stdin,
+    # which for an interactive launch is the terminal — a silent hang.
+    ((${#files[@]})) || return 0
+    [[ -z "$have_jq" ]] && { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
+    [[ "$have_jq" == true ]] || {
+        echo "Warning: jq not installed — cannot read /etc/claude-code for the" >&2
+        echo "  executables it names, so any managed hook or helper will not run" >&2
+        echo "  inside the sandbox. Install jq to restore them." >&2
+        return
+    }
+    while IFS= read -r cmd; do
+        # read -ra rather than unquoted $cmd: bare word-splitting would also glob.
+        read -ra toks <<<"$cmd"
+        for tok in "${toks[@]}"; do
+            tok="${tok#[\"\']}"; tok="${tok%[\"\']}"
+            [[ "$tok" == /* && -e "$tok" ]] || continue
+            dir="${tok%/*}"
+            # >=2 components (/a/b), mirroring the /opt/*/* guard on the front-end
+            # tools: stripping a basename must never collapse to /, /opt or /home
+            # and bind the lot.
+            case "$dir" in /*/*) ;; *) continue ;; esac
+            # Already ro-bound wholesale far above, so binding again would cost a
+            # stat fork and a redundant mount. Deliberately excludes /var and /opt:
+            # /var is a tmpfs here and /opt is the empty --dir this function exists
+            # to work around, so both genuinely need the bind.
+            case "$dir" in /usr/*|/etc/*|/bin/*|/sbin/*|/lib*/*) continue ;; esac
+            [[ -n "${seen[$dir]:-}" ]] && continue
+            seen[$dir]=1
+            if _root_owned "$dir"; then
+                _bind_if_exists "$dir" d ro-bind
+            else
+                echo "Warning: not mounting managed path $dir — it must be root-owned and" >&2
+                echo "  not group/world-writable. Have an admin chown root:root and chmod" >&2
+                echo "  go-w it; until then that hook or helper does not run in the sandbox." >&2
+            fi
+        done
+    # Every access is `?`-guarded: an unexpected shape (a legacy string
+    # statusLine, a top-level array) would otherwise abort jq mid-run and
+    # silently drop the *remaining* files' paths along with it.
+    done < <(jq -r '[ (.hooks? | .. | objects | .command?),
+                      .statusLine?.command?, .apiKeyHelper?,
+                      .awsCredentialExport?, .awsAuthRefresh?,
+                      .otelHeadersHelper? ] | .[] | strings' \
+                "${files[@]}" 2>/dev/null)
+}
+_mount_managed_config_paths
 
 # Additional mount points
 for mount_spec in "${mount_args[@]}"; do
