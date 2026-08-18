@@ -16,9 +16,13 @@ sed -n '/^_hardcoded_env_vars=(/,/^)/p' "$BLAUDE" \
 
 echo ""
 echo "=== PASSTHROUGH (claude_env_vars array) ==="
-sed -n '/^claude_env_vars=(/,/^)/p' "$BLAUDE" \
+# //!p drops the `claude_env_vars=(` and `)` delimiters, which would otherwise
+# match the name pattern themselves now that it accepts lowercase — needed for
+# the both-case proxy entries (https_proxy et al.), which an uppercase-only
+# pattern silently dropped, making the audit re-report them as missing.
+sed -n '/^claude_env_vars=(/,/^)/{//!p}' "$BLAUDE" \
   | grep -v '^\s*#' \
-  | grep -oP '[A-Z][A-Z0-9_*]+' \
+  | grep -oP '[A-Za-z][A-Za-z0-9_*]+' \
   | sort -u
 
 echo ""

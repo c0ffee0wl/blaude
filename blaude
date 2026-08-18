@@ -1712,6 +1712,9 @@ claude_env_vars=(
     # MCP_SERVER_CONNECTION_BATCH_SIZE tunable — are matched by the MCP_SERVER_*
     # glob in the passthrough loop below, so neither is listed explicitly here.
     # (MCP_REMOTE_SERVER_* does not match that glob, hence its explicit entry above.)
+    # MCP_SDK_GENERATION pins the MCP client runtime (v1/v2) while Claude Code
+    # migrates between them (2.1.218+); MCP_SDK_* misses that glob too.
+    MCP_SDK_GENERATION
     # OpenTelemetry exporter + W3C trace context
     OTEL_METRICS_EXPORTER OTEL_LOGS_EXPORTER OTEL_TRACES_EXPORTER
     OTEL_EXPORTER_OTLP_PROTOCOL OTEL_EXPORTER_OTLP_ENDPOINT OTEL_EXPORTER_OTLP_HEADERS
@@ -1740,8 +1743,11 @@ claude_env_vars=(
     MAX_THINKING_TOKENS MAX_MCP_OUTPUT_TOKENS MAX_STRUCTURED_OUTPUT_RETRIES
     TASK_MAX_OUTPUT_LENGTH SLASH_COMMAND_TOOL_CHAR_BUDGET API_TIMEOUT_MS API_FORCE_IDLE_TIMEOUT
     FALLBACK_FOR_ALL_PRIMARY_MODELS
-    # Network & TLS
+    # Network & TLS. Both spellings: Claude Code reads https_proxy, HTTPS_PROXY,
+    # http_proxy, HTTP_PROXY in that order, so the lowercase form — the Linux
+    # convention — wins. See CLAUDE.md for why dropping it stranded proxied hosts.
     HTTP_PROXY HTTPS_PROXY SOCKS_PROXY NO_PROXY
+    https_proxy http_proxy socks_proxy no_proxy
     # CLAUDE_CODE_CERT_STORE (bundled,system) superseded the old
     # USE_BUILTIN_CA_BUNDLE/USE_SYSTEM_CA toggles and rides the CLAUDE_* prefix.
     NODE_EXTRA_CA_CERTS NODE_TLS_REJECT_UNAUTHORIZED

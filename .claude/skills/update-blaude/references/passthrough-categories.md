@@ -11,7 +11,7 @@
 | `# OpenTelemetry exporter + W3C trace context` | `OTEL_*`, `TRACEPARENT`, `TRACESTATE` |
 | `# Bash / shell tool tunables` | `BASH_DEFAULT_TIMEOUT_MS`, `BASH_MAX_*` |
 | `# Token & retry limits` | `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, `API_TIMEOUT_MS`, `FALLBACK_FOR_ALL_PRIMARY_MODELS` |
-| `# Network & TLS` | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS` |
+| `# Network & TLS` | `HTTP_PROXY`, `HTTPS_PROXY`, `SOCKS_PROXY`, `NO_PROXY` **and their lowercase twins** (`https_proxy` et al. — Claude Code reads the lowercase form first), `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED` |
 | `# Updates & installation toggles` | `FORCE_AUTOUPDATE_PLUGINS`, `DISABLE_INSTALLATION_CHECKS`, `DISABLE_UPDATES`, `DISABLE_*_COMMAND` |
 | `# Caching & compaction toggles` | `DISABLE_PROMPT_CACHING*`, `ENABLE_PROMPT_CACHING_1H*`, `FORCE_PROMPT_CACHING_5M` |
 | `# Runtime indicators (set by Claude Code itself or external tooling) and misc` | `CLAUDECODE`, `AI_AGENT`, `DEBUG`, `IS_DEMO`, `FORCE_HYPERLINK`, `USE_BUILTIN_RIPGREP`, `CCR_FORCE_BUNDLE`, `DISABLE_COST_WARNINGS` |
@@ -26,6 +26,8 @@
 - **`CLAUDE_*`**: all Claude Code vars (`CLAUDE_CODE_*`, `CLAUDE_AGENT_SDK_*`, `CLAUDE_AUTOCOMPACT_*`, `CLAUDE_BASH_*`, `CLAUDE_CONFIG_DIR`, `CLAUDE_EFFORT`, `CLAUDE_ENABLE_*`, `CLAUDE_ENV_FILE`, `CLAUDE_MEM_*`, `CLAUDE_PLUGIN_*`, `CLAUDE_REMOTE_CONTROL_*`, `CLAUDE_SKILL_DIR`, `CLAUDE_STREAM_*`, etc.)
 - **`VERTEX_REGION_*`**: all Vertex per-model region overrides plus `VERTEX_REGION_DEFAULT` / `VERTEX_REGION_SMALL_FAST_MODEL` — new models need no blaude change
 - **`DISABLE_PROMPT_CACHING*`**: the bare toggle and every per-model `DISABLE_PROMPT_CACHING_<MODEL>` variant
+- **`MCP_SERVER_*`**: env-based MCP server config (`MCP_SERVER_<SERVER_ID>=<COMMAND>`) plus `MCP_SERVER_CONNECTION_BATCH_SIZE`. Note it does **not** cover other `MCP_*` names — `MCP_SDK_GENERATION`, `MCP_REMOTE_SERVER_*` and the timeout knobs are all enumerated explicitly
+- **`WARP_*`**: Warp/zap terminal integration (notification hooks gate on these)
 - **`*_WEBHOOK`** and **`WEBSHARE_*`**: other prefix patterns in the loop
 
 ## Intentional non-official vars
