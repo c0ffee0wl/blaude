@@ -149,9 +149,9 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 
 ## Managed settings executables
 
-On an enterprise-managed box, `/etc/claude-code/managed-settings.json` points at scripts on the host: a `PreToolUse` hook, `statusLine.command`, `apiKeyHelper`, and the AWS and OpenTelemetry credential helpers.
+On an enterprise-managed box, `/etc/claude-code/managed-settings.json` points at scripts on the host: a `PreToolUse` hook, `statusLine.command`, `apiKeyHelper`, the AWS and OpenTelemetry credential helpers, a `policyHelper.path` program, and the `sandbox.bwrapPath`, `sandbox.socatPath` and `sandbox.ripgrep.command` binaries.
 
-`/etc` is bind-mounted read-only, so those settings are visible inside the sandbox. The scripts they name usually are not, because they tend to live under `/opt`, which blaude replaces with an empty directory. The hook is the case that matters most. It is the one enforcement layer that survives `--dangerously-skip-permissions`, which blaude always passes, and when its script is missing it fails quietly: Claude Code reports a hook error on every tool call and then runs the command anyway. A missing `apiKeyHelper` is louder but no better, since the session gets no credential at all.
+`/etc` is bind-mounted read-only, so those settings are visible inside the sandbox. The scripts they name usually are not, because they tend to live under `/opt`, which blaude replaces with an empty directory. The hook is the case that matters most. It is the one enforcement layer that survives `--dangerously-skip-permissions`, which blaude always passes, and when its script is missing it fails quietly: Claude Code reports a hook error on every tool call and then runs the command anyway. A missing `apiKeyHelper` is louder but no better, since the session gets no credential at all. A missing policy helper is the loudest: Claude Code refuses to start.
 
 blaude reads those settings and bind-mounts the directory holding each script read-only, so they keep working. The directory rather than the file alone, so a helper that sources a sibling still resolves.
 

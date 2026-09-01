@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Extract environment variables from the blaude script.
 # Usage: extract-vars.sh <path-to-blaude>
-# Outputs two sections: HARDCODED (Claude Code config block) and PASSTHROUGH (claude_env_vars array).
+# Outputs one section per mechanism: hardcoded, passthrough, force-unset,
+# auto-mounted paths, passthrough globs, and the managed-settings command keys.
 
 set -euo pipefail
 BLAUDE="${1:-blaude}"
@@ -45,3 +46,23 @@ echo "=== AUTO-MOUNTED FILE/PATH VARS ==="
     | grep -oE '\b[A-Z][A-Z0-9_]+\b' || true
   grep -oE '(_bind_if_exists|<<<) +"\$\{?[A-Z][A-Z0-9_]+' "$BLAUDE" | grep -oE '[A-Z][A-Z0-9_]+$' || true
 } | grep -vE '^(HOME|UID)$' | sort -u
+
+echo ""
+echo "=== PASSTHROUGH GLOBS (prefix/suffix patterns in the env loop) ==="
+# The `"$name" == PATTERN` alternatives of the passthrough `if`, one per line,
+# so an audit can match documented names against them instead of hand-copying
+# the list (which drifted every time a glob family was added).
+sed -n '/^\s*if \[\[ -n "\${_env_whitelist/,/\]\]; then/p' "$BLAUDE" \
+  | grep -oE '"\$name" == [A-Za-z_*]+' \
+  | grep -oE '[A-Za-z_*]+$' \
+  | sort -u
+
+echo ""
+echo "=== MANAGED COMMAND KEYS (jq in _mount_managed_config_paths) ==="
+# The enumerated settings keys whose executable paths get their directory
+# ro-bound. Prints the jq key paths with the `?` guards stripped, e.g.
+# `.policyHelper.path`; `(.hooks | .. | objects | .command)` covers every hook
+# event. Diff against the settings reference's executable-valued keys.
+sed -n "/^_mount_managed_config_paths()/,/^}/{/jq -r '\[/,/\] | \.\[\]/{s/?//g;p}}" "$BLAUDE" \
+  | grep -oE '\(\.hooks[^)]*\)|\.[A-Za-z][A-Za-z0-9_.]*' \
+  | sort -u

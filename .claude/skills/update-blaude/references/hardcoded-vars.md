@@ -30,4 +30,4 @@ Forced absent via `--unsetenv` and included in the same passthrough deny-set. Re
 
 ## Related: settings.json blocker detection
 
-`_warn_if_bypass_disabled` (~line 277) scans `settings.json`/`managed-settings.json` for `permissions.disableBypassPermissionsMode: "disable"` and warns at startup. This is a JSON setting, not an env var — but it's a parallel mechanism for blocking bypass mode. If a new audit reveals additional JSON keys (or env vars) that block bypass mode, extend this function or add a new hardcoded entry above.
+An inline startup scan (not a function — search blaude for `_disable_re`; the scanned files are listed in the CLAUDE.md bullet "Bypass-permissions blocker detection") warns when any settings scope sets `permissions.disableBypassPermissionsMode: "disable"`. This is a JSON setting, not an env var — but it's a parallel mechanism for blocking bypass mode. If a new audit reveals additional JSON keys (or env vars) that block bypass mode, extend that scan or add a new hardcoded entry above.

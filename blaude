@@ -1248,7 +1248,11 @@ _root_owned() {
 # sits under /opt, which the empty `--dir /opt` shadows. bash exits 127, Claude
 # Code treats a non-2 exit as a *non-blocking* hook error, and the guard prints an
 # error on every tool call while enforcing nothing. apiKeyHelper fails louder but
-# just as fatally: a dangling helper means no credential at all.
+# just as fatally: a dangling helper means no credential at all. policyHelper.path
+# fails hardest: Claude Code runs it before the first prompt and *refuses to
+# start* without it, so blaude does not launch at all. The
+# sandbox.{bwrapPath,socatPath,ripgrep.command} binaries are the same shape (the
+# docs' own examples put them under /opt/admin).
 #
 # Bind the directory holding each script, not the bare file, so a helper that
 # sources a sibling still resolves. (The two binds above take the opposite call
@@ -1257,7 +1261,10 @@ _root_owned() {
 # Only these enumerated command-valued keys are read, never the whole document: a
 # recursive scan would also hit permissions.deny[], where an entry like
 # `Read(//opt/vendor/.env)` would be mistaken for a path and mount the directory
-# holding the very secret the rule exists to deny.
+# holding the very secret the rule exists to deny. The same trap sits right beside
+# the sandbox keys: reading .sandbox as a subtree would harvest
+# sandbox.credentials.files and sandbox.filesystem.denyRead — the paths an admin
+# listed precisely to keep them hidden.
 #
 # Managed scope only. $config_dir and the workspace's .claude/settings.json are
 # bind-mounted read-write into the sandbox, so harvesting mount paths from them
@@ -1314,10 +1321,13 @@ _mount_managed_config_paths() {
     # Every access is `?`-guarded: an unexpected shape (a legacy string
     # statusLine, a top-level array) would otherwise abort jq mid-run and
     # silently drop the *remaining* files' paths along with it.
+    # sandbox.ripgrep.args is arguments, not an executable — not read.
     done < <(jq -r '[ (.hooks? | .. | objects | .command?),
                       .statusLine?.command?, .apiKeyHelper?,
                       .awsCredentialExport?, .awsAuthRefresh?,
-                      .otelHeadersHelper? ] | .[] | strings' \
+                      .otelHeadersHelper?, .policyHelper?.path?,
+                      .sandbox?.bwrapPath?, .sandbox?.socatPath?,
+                      .sandbox?.ripgrep?.command? ] | .[] | strings' \
                 "${files[@]}" 2>/dev/null)
 }
 _mount_managed_config_paths
