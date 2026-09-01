@@ -462,6 +462,17 @@ for _settings_file in "${_settings_files[@]}"; do
 done
 unset _disable_re _settings_files _settings_file _f
 
+# Same problem from the env direction: restricted mode (Claude Code 2.1.248+)
+# refuses bypassPermissions outright. It rides the CLAUDE_* prefix passthrough,
+# so a host that exports it hands the sandboxed claude a flag combination it
+# rejects. Warn rather than force-unset — unlike the outer-claude markers this is
+# a deliberate hardening choice, and silently dropping it would undo it.
+if [[ "${CLAUDE_CODE_RESTRICTED:-}" == "1" ]]; then
+    echo "Warning: CLAUDE_CODE_RESTRICTED=1 is set in the environment." >&2
+    echo "  Restricted mode blocks --dangerously-skip-permissions which blaude always passes." >&2
+    echo "  Unset it before launching, or run claude directly for a restricted session." >&2
+fi
+
 # --- Build bwrap command ---
 
 bwrap_args=(
@@ -1641,19 +1652,21 @@ unset _kv
 # breaking blaude -c, TEAM_NAME is the parent's agent-team membership,
 # REMOTE/REMOTE_SESSION_ID the parent's claude.ai cloud-session
 # identity, EFFORT the parent turn's effort level, PROJECT_DIR the
-# parent's cwd, MESSAGING_SOCKET the parent's cross-session inbox socket
-# (2.1.224) and PID its process ID (2.1.214)). When blaude is invoked
+# parent's cwd, MESSAGING_SOCKET (2.1.224)/MESSAGING_TOKEN (2.1.228) the
+# parent's cross-session inbox socket and the token that authenticates a
+# write to it, and PID its process ID (2.1.214)). When blaude is invoked
 # from inside another claude session, the ANTHROPIC_*/CLAUDE_* prefix
 # passthrough would silently inherit these into the sandboxed inner
 # claude — wrong identity, wrong paths (outer binary not reachable
 # inside the sandbox), conflated session telemetry. Force-unset so inner
-# claude starts clean. Both new markers are re-exported by the inner
-# claude for its own subprocesses, so unsetting them is mainly hygiene —
-# except that MESSAGING_SOCKET's value stays *live* across the boundary
-# (the socket sits under the bind-mounted /tmp), handing sandboxed hooks
-# and Bash commands a writable pointer into the host session's inbox,
-# and PID names an unrelated process once inside the PID namespace,
-# where the Bash tool's pkill self-protection guard reads it.
+# claude starts clean. All three are re-exported by the inner claude for
+# its own subprocesses, so unsetting them is mainly hygiene — except that
+# MESSAGING_SOCKET's value stays *live* across the boundary (the socket
+# sits under the bind-mounted /tmp) and MESSAGING_TOKEN is the secret that
+# authenticates a write to it, together handing sandboxed hooks and Bash
+# commands an authenticated pointer into the host session's inbox; and PID
+# names an unrelated process once inside the PID namespace, where the Bash
+# tool's pkill self-protection guard reads it.
 _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB
     CLAUDE_CODE_ENTRYPOINT CLAUDE_CODE_EXECPATH
@@ -1661,7 +1674,7 @@ _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_TEAM_NAME
     CLAUDE_CODE_REMOTE CLAUDE_CODE_REMOTE_SESSION_ID
     CLAUDE_EFFORT CLAUDE_PROJECT_DIR
-    CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_PID
+    CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_PID
 )
 # Remote Control mode: force the telemetry/feature-flag opt-outs absent (so the
 # GrowthBook eligibility check can run) plus the auth vars that block RC — it needs
@@ -1707,7 +1720,17 @@ claude_env_vars=(
     MCP_OAUTH_CALLBACK_PORT MCP_CLIENT_SECRET ENABLE_TOOL_SEARCH
     ENABLE_CLAUDEAI_MCP_SERVERS MCP_CONNECTION_NONBLOCKING
     MCP_REMOTE_SERVER_CONNECTION_BATCH_SIZE
-    MCP_SSE_URL MCP_DISCOVERY_CACHE
+    MCP_SSE_URL
+    # MCP_DISCOVERY_CACHE and its tunables (_TTL_S, _STRIKES, _MAX_STALE_S) are
+    # matched by the MCP_DISCOVERY_CACHE* glob in the passthrough loop below —
+    # the family went from one var to four in a single release, so enumerating
+    # it costs a blaude commit per new knob. Same shape as DISABLE_PROMPT_CACHING*
+    # (base var plus suffixed variants), and the prefix is bounded: these are
+    # integer cache knobs, with none of the credential-leak surface that rules
+    # out a *_proxy suffix glob below.
+    # MCP_PROTOCOL_NEGOTIATION picks whether the v2 client runtime probes servers
+    # for MCP revision 2026-07-28 (auto/off); a singleton, hence explicit.
+    MCP_PROTOCOL_NEGOTIATION
     # MCP_SERVER_<SERVER_ID>=<COMMAND> env-based server config — plus the
     # MCP_SERVER_CONNECTION_BATCH_SIZE tunable — are matched by the MCP_SERVER_*
     # glob in the passthrough loop below, so neither is listed explicitly here.
@@ -1737,6 +1760,9 @@ claude_env_vars=(
     OTEL_ATTRIBUTE_VALUE_LENGTH_LIMIT
     OTEL_LOGRECORD_ATTRIBUTE_VALUE_LENGTH_LIMIT OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT
     TRACEPARENT TRACESTATE
+    # Detailed beta tracing: with ENABLE_BETA_TRACING_DETAILED=1, logs and traces
+    # go to BETA_TRACING_ENDPOINT instead of the exporters configured above.
+    BETA_TRACING_ENDPOINT ENABLE_BETA_TRACING_DETAILED
     # Bash / shell tool tunables
     BASH_DEFAULT_TIMEOUT_MS BASH_MAX_OUTPUT_LENGTH BASH_MAX_TIMEOUT_MS
     # Token & retry limits
@@ -1805,10 +1831,18 @@ if [[ "$keep_env_mode" != true ]]; then
     unset _kv
 
     while IFS= read -r name; do
-        [[ -n "${_env_denylist[$name]:-}" ]] && continue
+        # CLAUDE_CODE_MESSAGING_* is denied as a *family*, not by name: every
+        # member is a pointer into an outer session's inbox (SOCKET 2.1.224,
+        # TOKEN 2.1.228), so a third one must not ride the CLAUDE_* prefix into
+        # the sandbox by default and hand hooks a live handle on the host
+        # session. The concrete names stay in _hardcoded_unsetenv_vars above —
+        # --unsetenv on an already-absent var is a no-op, so the lists can
+        # diverge harmlessly.
+        [[ -n "${_env_denylist[$name]:-}" || "$name" == CLAUDE_CODE_MESSAGING_* ]] && continue
         if [[ -n "${_env_whitelist[$name]:-}" || \
               "$name" == ANTHROPIC_* || "$name" == CLAUDE_* || \
               "$name" == VERTEX_REGION_* || "$name" == DISABLE_PROMPT_CACHING* || \
+              "$name" == MCP_DISCOVERY_CACHE* || \
               "$name" == WARP_* || "$name" == MCP_SERVER_* || \
               "$name" == *_WEBHOOK || "$name" == WEBSHARE_* ]]; then
             _setenv_if_set "$name"
