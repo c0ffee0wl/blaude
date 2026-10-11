@@ -2,8 +2,10 @@
 # blaude - Run Claude Code in a bubblewrap sandbox.
 # Options not listed in README.md are passed through to claude.
 
-# Check for bwrap (capture path for later reuse — overlay-support mtime check needs it)
-_bwrap_bin=$(command -v bwrap)
+# Check for bwrap (capture path for later reuse — overlay-support mtime check needs it).
+# `hash` + BASH_CMDS resolves the path without a $(command -v) subshell.
+_bwrap_bin=""
+hash bwrap 2>/dev/null && _bwrap_bin=${BASH_CMDS[bwrap]}
 if [[ -z "$_bwrap_bin" ]]; then
     echo "Error: bubblewrap (bwrap) is not installed" >&2
     echo "Install with: apt install bubblewrap  OR  dnf install bubblewrap" >&2
@@ -95,7 +97,8 @@ fi
 # cache files that a later blaude run reads and trusts. (Earlier versions used
 # /tmp, which IS bind-mounted read-write into the sandbox by default.)
 _cache_dir="$HOME/.cache/blaude"
-mkdir -p "$_cache_dir" 2>/dev/null && chmod 700 "$_cache_dir" 2>/dev/null
+[[ -d "$_cache_dir" ]] || mkdir -p "$_cache_dir" 2>/dev/null
+chmod 700 "$_cache_dir" 2>/dev/null
 
 env_args=()
 mount_args=()
@@ -249,71 +252,28 @@ while [[ $# -gt 0 ]]; do
             if [[ "$1" == --env ]]; then env_args+=("$2"); else mount_args+=("$2"); fi
             shift 2
             ;;
-        --no-network)
-            no_network=true
-            shift
-            ;;
-        --git)
-            git_mode=true
-            shift
-            ;;
-        --ssh)
-            ssh_mode=true
-            shift
-            ;;
-        --remote-control)
-            # Consumed (not forwarded): prepare the env so /remote-control works
-            # on demand while claude still starts with --dangerously-skip-permissions.
-            remote_control_mode=true
-            shift
-            ;;
-        --aws)
-            aws_mode=true
-            shift
-            ;;
-        --keyring)
-            keyring_mode=true
-            shift
-            ;;
-        --keep-env)
-            keep_env_mode=true
-            shift
-            ;;
-        --allow-protected-writes)
-            allow_protected_writes=true
-            shift
-            ;;
-        --tmp)
-            tmp_mode=true
-            shift
-            ;;
-        --clear-tmp)
-            clear_tmp_mode=true
-            shift
-            ;;
-        --debug)
-            debug=true
-            shift
-            ;;
-        --dry-run)
-            dry_run=true
-            debug=true
-            shift
-            ;;
+        --no-network) no_network=true; shift ;;
+        --git) git_mode=true; shift ;;
+        --ssh) ssh_mode=true; shift ;;
+        # Consumed (not forwarded): prepare the env so /remote-control works
+        # on demand while claude still starts with --dangerously-skip-permissions.
+        --remote-control) remote_control_mode=true; shift ;;
+        --aws) aws_mode=true; shift ;;
+        --keyring) keyring_mode=true; shift ;;
+        --keep-env) keep_env_mode=true; shift ;;
+        --allow-protected-writes) allow_protected_writes=true; shift ;;
+        --tmp) tmp_mode=true; shift ;;
+        --clear-tmp) clear_tmp_mode=true; shift ;;
+        --debug) debug=true; shift ;;
+        --dry-run) dry_run=true; debug=true; shift ;;
         --exec)
             exec_mode=true
             shift
             command_args=("$@")
             break
             ;;
-        --chic)
-            chic_mode=true
-            shift
-            ;;
-        --no-clipboard)
-            no_clipboard=true
-            shift
-            ;;
+        --chic) chic_mode=true; shift ;;
+        --no-clipboard) no_clipboard=true; shift ;;
         *)
             command_args+=("$1")
             shift
@@ -357,6 +317,10 @@ required_flags='{"hasCompletedOnboarding": true, "bypassPermissionsModeAccepted"
 
 have_jq=""  # lazy: probed by whichever of merge_config_flags /
             # _mount_managed_config_paths needs jq first
+_have_jq() {
+    [[ -n "$have_jq" ]] || { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
+    [[ "$have_jq" == true ]]
+}
 
 merge_config_flags() {
     local file="$1" dir="${1%/*}"
@@ -383,16 +347,17 @@ merge_config_flags() {
     # Cheap pre-check avoids forking jq (and two greps) on every launch when flags
     # are already set. Slurp the file once and regex-match both flags via bash;
     # false negatives (unusual JSON formatting) fall through to the jq path.
-    local contents re1='"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true'
+    # LC_ALL=C: the patterns and JSON whitespace are ASCII, and byte matching is
+    # ~3x faster than UTF-8 on a large ~/.claude.json.
+    local LC_ALL=C contents re1='"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true'
     local re2='"bypassPermissionsModeAccepted"[[:space:]]*:[[:space:]]*true'
     contents=$(< "$file")
     [[ "$contents" =~ $re1 && "$contents" =~ $re2 ]] && return
-    [[ -z "$have_jq" ]] && { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
     # Say so rather than returning quietly: on a machine without jq this is the
     # likeliest reason the flags never get set, and the only symptom otherwise is
     # claude re-prompting for onboarding every launch. Fires only when the flags
     # are actually missing — the regex pre-check above returns first once set.
-    [[ "$have_jq" == true ]] || {
+    _have_jq || {
         echo "Warning: jq not installed — cannot set the onboarding flags in $file." >&2
         echo "  claude may prompt for onboarding; install jq or complete it once by hand." >&2
         return
@@ -490,7 +455,7 @@ bwrap_args+=(--unshare-user --uid "$sandbox_uid" --gid "$sandbox_gid")
 
 # --- Mount helpers ---
 # Bind <path> at its own location if it exists.
-# kind: f (file), d (directory), or e (exists — for symlinks etc.)
+# kind: f (file), d (directory), s (socket), or e (exists — for symlinks etc.)
 # mode: ro-bind or bind
 _bind_if_exists() {
     local path="$1" kind="$2" mode="$3"
@@ -498,6 +463,7 @@ _bind_if_exists() {
     case "$kind" in
         f) [[ -f "$path" ]] || return ;;
         d) [[ -d "$path" ]] || return ;;
+        s) [[ -S "$path" ]] || return ;;
         e) [[ -e "$path" ]] || return ;;
         *) echo "_bind_if_exists: invalid kind '$kind'" >&2; exit 1 ;;
     esac
@@ -513,6 +479,11 @@ _ensure_and_bind() {
     [[ -d "$1" ]] || mkdir -p "$1" 2>/dev/null
     _bind_if_exists "$1" d bind
 }
+# File counterpart: create empty if missing, then bind read-write.
+_ensure_file_and_bind() {
+    [[ -f "$1" ]] || : > "$1" 2>/dev/null
+    _bind_if_exists "$1" f bind
+}
 # Mount a host directory so its contents stay readable but writes are discarded
 # on exit — for host state the agent should read but never durably change
 # (~/.config, the npm/uv/bun caches). Read-only would be simpler but breaks real
@@ -526,8 +497,6 @@ _ensure_and_bind() {
 #   ro-bind  keep read-only behaviour, for callers upgraded from a plain ro-bind
 #            where a rw fallback would newly expose host state and a tmpfs would
 #            hide content the sandbox depends on
-#   tmpfs    blank writable dir, for callers that were a tmpfs before overlays
-#            and would otherwise be *newly* exposed by a bind fallback
 # Required (no default) and validated eagerly — even on overlay-capable hosts
 # where it isn't consumed — because a typo'd or forgotten fallback that only
 # errored on pre-0.8.0 bwrap would be a latent bug, and a silent default of
@@ -537,7 +506,7 @@ _ensure_and_bind() {
 _overlay_or_bind() {
     local path="$1" fallback="$2"
     case "$fallback" in
-        bind|ro-bind|tmpfs) ;;
+        bind|ro-bind) ;;
         *) echo "_overlay_or_bind: invalid fallback '$fallback' for $path" >&2; exit 1 ;;
     esac
     [[ -d "$path" ]] || return
@@ -550,8 +519,6 @@ _overlay_or_bind() {
         _bind_if_exists "$path" d bind
     elif [[ "$overlay_supported" == true ]]; then
         bwrap_args+=(--overlay-src "$path" --tmp-overlay "$path")
-    elif [[ "$fallback" == tmpfs ]]; then
-        bwrap_args+=(--tmpfs "$path")
     else
         _bind_if_exists "$path" d "$fallback"
         # Only rw fallbacks belong in the writes-persist warning; ro-bind
@@ -738,10 +705,7 @@ if [[ "$keyring_mode" == true ]]; then
     fi
     [[ -z "$dbus_socket" ]] && dbus_socket="/run/user/$_host_uid/bus"
 
-    if [[ -S "$dbus_socket" ]]; then
-        bwrap_args+=(--bind "$dbus_socket" "$dbus_socket")
-        _dbg "Binding D-Bus session socket: $dbus_socket"
-    fi
+    _bind_if_exists "$dbus_socket" s bind && _dbg "Binding D-Bus session socket: $dbus_socket"
 fi
 
 # Complete resolv.conf symlink handling (deferred from above, after --tmpfs /run)
@@ -939,11 +903,7 @@ _mount_linked_packages() {
         # Added after the parent ro-bind so bwrap's later-overrides-earlier rule keeps them writable.
         for token_file in ".token-cache.json" ".selected-account.json"; do
             local token_path="$link_target/$token_file"
-            [[ ! -f "$token_path" ]] && : > "$token_path" 2>/dev/null
-            if [[ -f "$token_path" ]]; then
-                _dbg "  Mounting token file read-write: $token_path"
-                bwrap_args+=(--bind "$token_path" "$token_path")
-            fi
+            _ensure_file_and_bind "$token_path" && _dbg "  Mounting token file read-write: $token_path"
         done
     done
 }
@@ -1027,8 +987,7 @@ _bind_if_exists "$HOME/.agents" d ro-bind
 # claudechic debug log (only needed if CLAUDECHIC_DEBUG is set)
 if [[ -n "${CLAUDECHIC_DEBUG:-}" ]]; then
     claudechic_log="$HOME/claudechic.log"
-    [[ -f "$claudechic_log" ]] || : > "$claudechic_log" 2>/dev/null
-    _bind_if_exists "$claudechic_log" f bind
+    _ensure_file_and_bind "$claudechic_log"
 fi
 
 # notebooklm-mcp auth directories (token cache, Chrome profiles, config)
@@ -1085,14 +1044,12 @@ _bind_if_exists "$HOME/arxiv-storage" d bind
 
 # Claude memory directory (for persistent memory across sessions)
 # Auto-create if claude-mem plugin is installed but data dir doesn't exist yet
-if [[ ! -d "$HOME/.claude-mem" ]]; then
-    if [[ -d "$config_dir/plugins/marketplaces/thedotmack" || \
-          -d "$config_dir/plugins/cache/claude-mem" ]]; then
-        mkdir -p "$HOME/.claude-mem"
-    elif [[ -r "$config_dir/plugins/installed_plugins.json" ]] && \
-         [[ "$(< "$config_dir/plugins/installed_plugins.json")" == *\"claude-mem\"* ]]; then
-        mkdir -p "$HOME/.claude-mem"
-    fi
+if [[ ! -d "$HOME/.claude-mem" ]] && {
+       [[ -d "$config_dir/plugins/marketplaces/thedotmack" || \
+          -d "$config_dir/plugins/cache/claude-mem" ]] ||
+       { [[ -r "$config_dir/plugins/installed_plugins.json" ]] && \
+         [[ "$(< "$config_dir/plugins/installed_plugins.json")" == *\"claude-mem\"* ]]; }; }; then
+    mkdir -p "$HOME/.claude-mem"
 fi
 _bind_if_exists "$HOME/.claude-mem" d bind
 
@@ -1105,8 +1062,9 @@ if [[ -d "$HOME/.bun" ]]; then
     # tmpfs on top — never a bind, which would newly expose host content.
     # Reading overlay_supported at a call site matches the protected-paths
     # section, which picks its strategy from the same flag.
-    if [[ "$overlay_supported" != true && "$allow_protected_writes" != true ]]; then
-        _overlay_or_bind "$HOME/.bun/install/cache" tmpfs
+    if [[ "$overlay_supported" != true && "$allow_protected_writes" != true &&
+          -d "$HOME/.bun/install/cache" ]]; then
+        bwrap_args+=(--tmpfs "$HOME/.bun/install/cache")
     fi
     # Scan bin/ and global node_modules/ separately to avoid traversing ~/.bun/install/cache
     _mount_linked_packages "bun" "$HOME/.bun" \
@@ -1120,8 +1078,8 @@ if [[ "$no_network" == true ]]; then
     bwrap_args+=(--unshare-net)
 fi
 
-# Bind a file/dir named by an env var, if set and existing, at its host path.
-# kind: f (file) or d (directory); mode: ro-bind or bind
+# Bind a file/dir/socket named by an env var, if set and existing, at its host path.
+# kind: as for _bind_if_exists; mode: ro-bind or bind
 _bind_env_path() { _bind_if_exists "${!1:-}" "$2" "$3"; }
 
 # Add --setenv VAR=<host value> to bwrap_args iff VAR is set and non-empty.
@@ -1156,6 +1114,11 @@ if [[ "$ssh_mode" == true ]]; then
         _bind_if_exists "${SSH_AUTH_SOCK%/*}" d bind
     fi
 fi
+
+# ANTHROPIC_UNIX_SOCKET (local API proxy): bind the socket itself, not its
+# parent like SSH_AUTH_SOCK — the parent is often /tmp, $HOME or /run/user/$UID,
+# whose shadows a whole-dir bind would undo. See CLAUDE.md.
+_bind_env_path ANTHROPIC_UNIX_SOCKET s bind
 
 # AWS mode: mount AWS config/credentials for Bedrock authentication
 if [[ "$aws_mode" == true ]]; then
@@ -1204,9 +1167,7 @@ done
 # file, default ~/.claude/debug/<session-id>.txt). The file won't exist yet,
 # so bind its parent directory read-write to let claude create it. Binding
 # the value itself as a directory would silently skip a custom file path.
-if [[ -n "${CLAUDE_CODE_DEBUG_LOGS_DIR:-}" ]]; then
-    _bind_if_exists "${CLAUDE_CODE_DEBUG_LOGS_DIR%/*}" d bind
-fi
+_bind_if_exists "${CLAUDE_CODE_DEBUG_LOGS_DIR%/*}" d bind
 
 # CLAUDE_CODE_PLUGIN_SEED_DIR: colon-separated list of directories (Claude Code 2.1.79+)
 if [[ -n "${CLAUDE_CODE_PLUGIN_SEED_DIR:-}" ]]; then
@@ -1285,8 +1246,7 @@ _mount_managed_config_paths() {
     # Also guards the jq call below: with no file operands jq would read stdin,
     # which for an interactive launch is the terminal — a silent hang.
     ((${#files[@]})) || return 0
-    [[ -z "$have_jq" ]] && { command -v jq &>/dev/null && have_jq=true || have_jq=false; }
-    [[ "$have_jq" == true ]] || {
+    _have_jq || {
         echo "Warning: jq not installed — cannot read /etc/claude-code for the" >&2
         echo "  executables it names, so any managed hook or helper will not run" >&2
         echo "  inside the sandbox. Install jq to restore them." >&2
@@ -1370,9 +1330,10 @@ if [[ "$tmp_mode" == true ]]; then
     bwrap_args+=(--chdir /tmp)
 else
     # Reject $HOME as workspace (would expose entire home directory read-write).
-    # Skip the readlink -f fork entirely when the override is set.
+    # Skip resolving entirely when the override is set. current_dir is $PWD,
+    # so the builtin `pwd -P` equals readlink -f without exec'ing an external.
     if [[ "$allow_protected_writes" != true ]]; then
-        resolved_workspace=$(readlink -f "$current_dir")
+        resolved_workspace=$(pwd -P)
         _reject_if_home "$resolved_workspace" "sandbox home directory as workspace" \
             "Use a subdirectory instead, --tmp, or --allow-protected-writes to override."
     fi
@@ -1632,9 +1593,8 @@ if [[ "$keep_env_mode" != true ]]; then
 fi
 
 # Hardcoded env-var overrides — KEY=VALUE pairs forced into the sandbox,
-# never accepted from host env (the passthrough loop below explicitly removes
-# them from the whitelist, so they can't drift if added to claude_env_vars
-# by accident). CLAUDE_DISABLE_CONFIG_WATCH prevents inotify ENOSPC crashes.
+# never accepted from host env (the passthrough loop below puts them in its
+# deny-set, so they can't drift if added to claude_env_vars by accident). CLAUDE_DISABLE_CONFIG_WATCH prevents inotify ENOSPC crashes.
 _hardcoded_env_vars=(
     DISABLE_AUTOUPDATER=1 DISABLE_ERROR_REPORTING=1
     DISABLE_BUG_COMMAND=1 CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
@@ -1645,10 +1605,9 @@ _hardcoded_env_vars=(
 # below). Privacy default keeps them on for every normal session.
 [[ "$remote_control_mode" != true ]] && \
     _hardcoded_env_vars+=(DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_GROWTHBOOK=1)
-for _kv in "${_hardcoded_env_vars[@]}"; do
-    bwrap_args+=(--setenv "${_kv%%=*}" "${_kv#*=}")
-done
-unset _kv
+# Emit --setenv for each KEY=VALUE argument (also used for --env below).
+_setenv_pairs() { local kv; for kv; do bwrap_args+=(--setenv "${kv%%=*}" "${kv#*=}"); done; }
+_setenv_pairs "${_hardcoded_env_vars[@]}"
 
 # Hardcoded env-var unsets — forced absent regardless of host env.
 # CLAUDE_CODE_SUBPROCESS_ENV_SCRUB triggers permission-mode hardening
@@ -1664,13 +1623,15 @@ unset _kv
 # identity, EFFORT the parent turn's effort level, PROJECT_DIR the
 # parent's cwd, MESSAGING_SOCKET (2.1.224)/MESSAGING_TOKEN (2.1.228) the
 # parent's cross-session inbox socket and the token that authenticates a
-# write to it, and PID its process ID (2.1.214)). When blaude is invoked
+# write to it, PID its process ID (2.1.214), and JOB_DIR the parent
+# background session's ~/.claude/jobs/<id> scratch dir). When blaude is invoked
 # from inside another claude session, the ANTHROPIC_*/CLAUDE_* prefix
 # passthrough would silently inherit these into the sandboxed inner
 # claude — wrong identity, wrong paths (outer binary not reachable
 # inside the sandbox), conflated session telemetry. Force-unset so inner
-# claude starts clean. All three are re-exported by the inner claude for
-# its own subprocesses, so unsetting them is mainly hygiene — except that
+# claude starts clean. MESSAGING_SOCKET, MESSAGING_TOKEN and PID are
+# re-exported by the inner claude for its own subprocesses, so unsetting
+# them is mainly hygiene — except that
 # MESSAGING_SOCKET's value stays *live* across the boundary (the socket
 # sits under the bind-mounted /tmp) and MESSAGING_TOKEN is the secret that
 # authenticates a write to it, together handing sandboxed hooks and Bash
@@ -1685,6 +1646,7 @@ _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_REMOTE CLAUDE_CODE_REMOTE_SESSION_ID
     CLAUDE_EFFORT CLAUDE_PROJECT_DIR
     CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_PID
+    CLAUDE_JOB_DIR
 )
 # Remote Control mode: force the telemetry/feature-flag opt-outs absent (so the
 # GrowthBook eligibility check can run) plus the auth vars that block RC — it needs
@@ -1764,6 +1726,7 @@ claude_env_vars=(
     OTEL_LOG_USER_PROMPTS OTEL_LOG_ASSISTANT_RESPONSES OTEL_LOG_TOOL_DETAILS OTEL_LOG_TOOL_CONTENT
     OTEL_METRICS_INCLUDE_SESSION_ID OTEL_METRICS_INCLUDE_VERSION OTEL_METRICS_INCLUDE_ACCOUNT_UUID
     OTEL_METRICS_INCLUDE_ENTRYPOINT OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES
+    OTEL_METRICS_INCLUDE_REPOSITORY OTEL_LOG_MANAGED_SETTINGS
     OTEL_RESOURCE_ATTRIBUTES OTEL_LOG_RAW_API_BODIES
     # Standard OTel SDK attribute-length caps (Claude Code 2.1.214+); the per-signal
     # LOGRECORD/SPAN variants are read the same way.
@@ -1777,7 +1740,7 @@ claude_env_vars=(
     BASH_DEFAULT_TIMEOUT_MS BASH_MAX_OUTPUT_LENGTH BASH_MAX_TIMEOUT_MS
     # Token & retry limits
     MAX_THINKING_TOKENS MAX_MCP_OUTPUT_TOKENS MAX_STRUCTURED_OUTPUT_RETRIES
-    TASK_MAX_OUTPUT_LENGTH SLASH_COMMAND_TOOL_CHAR_BUDGET API_TIMEOUT_MS API_FORCE_IDLE_TIMEOUT
+    SLASH_COMMAND_TOOL_CHAR_BUDGET API_TIMEOUT_MS API_FORCE_IDLE_TIMEOUT
     FALLBACK_FOR_ALL_PRIMARY_MODELS
     # Network & TLS. Both spellings: Claude Code reads https_proxy, HTTPS_PROXY,
     # http_proxy, HTTP_PROXY in that order, so the lowercase form — the Linux
@@ -1864,11 +1827,7 @@ if [[ "$keep_env_mode" != true ]]; then
     [[ "$keyring_mode" == true ]] && _setenv_if_set DBUS_SESSION_BUS_ADDRESS
 fi
 
-for env_spec in "${env_args[@]}"; do
-    key="${env_spec%%=*}"
-    value="${env_spec#*=}"
-    bwrap_args+=(--setenv "$key" "$value")
-done
+_setenv_pairs "${env_args[@]}"
 
 # --- Build command ---
 

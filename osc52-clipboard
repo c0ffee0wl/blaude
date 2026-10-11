@@ -128,12 +128,20 @@ class _OSC52Scanner:
                     state = _PAYLOAD_ESC
                 continue
 
+            # Plain output is the common case and is dense with ESC (colour and
+            # cursor codes), so skip to the next ESC at C level too rather than
+            # stepping byte by byte.
+            if state == _PASSTHROUGH:
+                i = data.find(0x1B, i)
+                if i == -1:
+                    break
+                i += 1
+                state = _SAW_ESC
+                continue
+
             b = data[i]
             i += 1
-            if state == _PASSTHROUGH:
-                if b == 0x1B:
-                    state = _SAW_ESC
-            elif state == _SAW_ESC:
+            if state == _SAW_ESC:
                 if b == 0x5D:  # ']'
                     state = _IN_OSC
                     buf.clear()
