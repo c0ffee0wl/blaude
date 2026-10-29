@@ -111,7 +111,6 @@ blaude --exec bash
 | `--keyring` | Enable GNOME Keyring access (for keytar) |
 | `--remote-control` | Prepare the session for [Remote Control](#remote-control), so `/remote-control` works on demand |
 | `--keep-env` | Keep the entire host environment instead of clearing it |
-| `--chic` | Run [claudechic](https://github.com/mrocklin/claudechic) TUI instead of claude |
 | `--tmp` | Run isolated in /tmp |
 | `--clear-tmp` | Use empty tmpfs for /tmp instead of mounting host's /tmp |
 | `--allow-protected-writes` | Allow writes to [protected files](#protected-workspace-paths) |
@@ -131,7 +130,7 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 | `/run/user/<uid>` | tmpfs | Empty XDG runtime dir; `XDG_RUNTIME_DIR` set accordingly. Wayland/PipeWire/D-Bus sockets only appear via opt-in (`--keyring` for D-Bus). |
 | `/tmp` | read-write | Host's /tmp, minus its IPC socket dirs (see [Host /tmp sockets](#host-tmp-sockets)); use `--clear-tmp` for a fully isolated tmpfs |
 | `/workspaces/<dir>` | read-write | Your project (current directory) |
-| `~/.claude` | read-write | Claude Code config (includes claudechic config) |
+| `~/.claude` | read-write | Claude Code config |
 | `~/.config/` | overlay | User config (uv, fabric, google-chrome, etc.): readable, writes discarded on exit |
 | `~/.notebooklm-mcp/`, `~/.notebooklm-mcp-cli/` | read-write | notebooklm-mcp auth and Chrome profile |
 | `~/.claude-mem/` | read-write | Persistent memory across sessions (auto-created if claude-mem plugin is installed) |
@@ -149,11 +148,11 @@ All other options (like `-p`, `-c`, `-v`, `--resume`, etc.) pass directly to cla
 
 ## Managed settings executables
 
-On an enterprise-managed box, `/etc/claude-code/managed-settings.json` points at scripts on the host: a `PreToolUse` hook, `statusLine.command`, `apiKeyHelper`, the AWS and OpenTelemetry credential helpers, a `policyHelper.path` program, and the `sandbox.bwrapPath`, `sandbox.socatPath` and `sandbox.ripgrep.command` binaries.
+On an enterprise-managed box, `/etc/claude-code/managed-settings.json` points at scripts on the host: a `PreToolUse` hook, `statusLine.command`, `apiKeyHelper`, the AWS and OpenTelemetry credential helpers, a `policyHelper.path` program, the `sandbox.bwrapPath`, `sandbox.socatPath` and `sandbox.ripgrep.command` binaries, and your organization's mods: a plugin marketplace directory named by `extraKnownMarketplaces` (for example `/opt/acme/claude-plugins`) along with any marketplace `headersHelper` command. A missing marketplace directory means the organization's policy mod never loads.
 
 `/etc` is bind-mounted read-only, so those settings are visible inside the sandbox. The scripts they name usually are not, because they tend to live under `/opt`, which blaude replaces with an empty directory. The hook is the case that matters most. It is the one enforcement layer that survives `--dangerously-skip-permissions`, which blaude always passes, and when its script is missing it fails quietly: Claude Code reports a hook error on every tool call and then runs the command anyway. A missing `apiKeyHelper` is louder but no better, since the session gets no credential at all. A missing policy helper is the loudest: Claude Code refuses to start.
 
-blaude reads those settings and bind-mounts the directory holding each script read-only, so they keep working. The directory rather than the file alone, so a helper that sources a sibling still resolves.
+blaude reads those settings and bind-mounts the directory holding each script read-only, so they keep working. The directory rather than the file alone, so a helper that sources a sibling still resolves. A marketplace directory is mounted itself.
 
 Only `/etc/claude-code/managed-settings.json` and `/etc/claude-code/managed-settings.d/*.json` are read. Your `~/.claude/settings.json` and the workspace's `.claude/settings.json` are bind-mounted read-write into the sandbox, so a sandboxed agent could plant a hook in one session to widen its own filesystem access in the next; the managed files are out of its reach. Within them, only the keys listed above are read, never the whole file, because `permissions.deny[]` holds paths that are meant to stay unreachable.
 
@@ -169,22 +168,11 @@ For npm-linked packages, the token files at the package root (`.token-cache.json
 
 If you have GNOME Keyring configured and unlocked at login, `--keyring` turns keytar-based storage back on and gives you the more secure option.
 
-## claudechic support
-
-[claudechic](https://github.com/mrocklin/claudechic) is a Python-based TUI wrapper for Claude Code. Use `--chic` to run it inside the sandbox:
-
-```bash
-blaude --chic              # Run claudechic in sandbox
-blaude --chic -c           # Continue conversation via claudechic
-```
-
-Config file (`~/.claude/.claudechic.yaml`) is writable via the `~/.claude` mount.
-
 ## Remote Control
 
 [Remote Control](https://code.claude.com/docs/en/remote-control) lets you drive a local Claude Code session from your phone or a browser. It needs a flag from blaude, because blaude's usual privacy settings switch it off by accident.
 
-Claude Code asks the GrowthBook feature-flag service whether your account may use Remote Control. blaude normally sets `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1` and `DISABLE_GROWTHBOOK=1`, so that request never goes out, and the feature reports `Remote Control is not yet enabled for your account` even on accounts that have it. The flag drops those three opt-outs for one session.
+Claude Code asks the GrowthBook feature-flag service whether your account may use Remote Control. blaude normally sets `DISABLE_GROWTHBOOK=1`, so that request never goes out, and the feature reports `Remote Control is not yet enabled for your account` even on accounts that have it. The flag drops that opt-out (and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, if you set it) for one session. `DO_NOT_TRACK=1` and `DISABLE_TELEMETRY=1` stay set, which Remote Control accepts unless your organization requires Trusted Devices; in that case run `claude` directly for Remote Control.
 
 ```bash
 blaude --remote-control     # normal session; run /remote-control when you want it
@@ -197,7 +185,7 @@ Either form also unsets `ANTHROPIC_API_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` for th
 
 Two limits come from Claude Code itself, so blaude prints them as notices instead of working around them:
 
-- Telemetry and feature-flag traffic flows while Remote Control is on. You cannot have the feature without it.
+- Feature-flag traffic flows while Remote Control is on. You cannot have the feature without it. Telemetry stays off.
 - Remote-driven actions still ask for permission, even though blaude passes `--dangerously-skip-permissions`.
 
 Don't combine this with `--no-network`. Remote Control needs outbound network, and blaude warns if you ask for both.
@@ -245,7 +233,7 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 
 > **Non-prefix passthrough**: rows that don't start with `ANTHROPIC_`/`CLAUDE_` come from blaude's explicit `claude_env_vars` allowlist. Here `*` is a shorthand for a specific enumerated list, not a wildcard. For example, `AWS_*` means `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_REGION`, `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_ROLE_ARN`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `AWS_BEARER_TOKEN_BEDROCK`. Variables not in the allowlist won't pass through; use `--env KEY=VALUE` for those.
 
-> **Forced env-vars**: a small set of variables is hardcoded in the sandbox and overrides the host value (also under `--keep-env`) to keep blaude's auto-skip behaviour working: `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `DISABLE_AUTOUPDATER=1`, `DISABLE_ERROR_REPORTING=1`, `DISABLE_BUG_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `DISABLE_INSTALL_GITHUB_APP_COMMAND=1`, `CLAUDE_DISABLE_CONFIG_WATCH=1`, `DISABLE_GROWTHBOOK=1`. These are kept in a deny-set so the `CLAUDE_*` prefix match cannot resurrect their host values. Additionally, the following are force-*unset* inside the sandbox (via `--unsetenv`): **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`**: any defined value, even `=0`, triggers permission-mode hardening that overrides `--dangerously-skip-permissions` (`"Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set …"`), so blaude drops it to match the documented default (unset = disabled); and **`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_PID`, `CLAUDE_JOB_DIR`**: markers an outer claude sets automatically (parent binary identity, parent session UUID, parent Remote Control session ID, nested-session flag, agent-team membership, cloud-session identity, parent turn's effort level, parent cwd, parent's cross-session inbox socket and its auth token, parent's PID, parent background session's job dir) that would otherwise leak into the sandboxed inner claude when blaude is invoked from inside another claude session; an inherited `CLAUDE_CODE_CHILD_SESSION=1` would even exclude the session from `--resume`/`--continue`, breaking `blaude -c`. The last two matter beyond hygiene: `CLAUDE_CODE_MESSAGING_SOCKET` stays *live* across the boundary (the socket sits under the bind-mounted `/tmp`), handing sandboxed hooks and Bash commands a writable pointer into the **host** session's inbox, and `CLAUDE_PID` names an unrelated process once inside the PID namespace, where the Bash tool's `pkill` self-protection guard reads it.
+> **Forced env-vars**: a small set of variables is hardcoded in the sandbox and overrides the host value (also under `--keep-env`) to keep blaude's auto-skip behaviour working: `DO_NOT_TRACK=1`, `DISABLE_TELEMETRY=1`, `DISABLE_AUTOUPDATER=1`, `DISABLE_ERROR_REPORTING=1`, `DISABLE_BUG_COMMAND=1`, `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1`, `DISABLE_INSTALL_GITHUB_APP_COMMAND=1`, `CLAUDE_DISABLE_CONFIG_WATCH=1`, and `DISABLE_GROWTHBOOK=1` (except in [Remote Control](#remote-control) mode). These are kept in a deny-set so the `CLAUDE_*` prefix match cannot resurrect their host values. Additionally, the following are force-*unset* inside the sandbox (via `--unsetenv`): **`CLAUDE_CODE_SUBPROCESS_ENV_SCRUB`**: any defined value, even `=0`, triggers permission-mode hardening that overrides `--dangerously-skip-permissions` (`"Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set …"`), so blaude drops it to match the documented default (unset = disabled); and **`CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_PID`, `CLAUDE_JOB_DIR`**: markers an outer claude sets automatically (parent binary identity, parent session UUID, parent Remote Control session ID, nested-session flag, agent-team membership, cloud-session identity, parent turn's effort level, parent cwd, parent's cross-session inbox socket and its auth token, parent's PID, parent background session's job dir) that would otherwise leak into the sandboxed inner claude when blaude is invoked from inside another claude session; an inherited `CLAUDE_CODE_CHILD_SESSION=1` would even exclude the session from `--resume`/`--continue`, breaking `blaude -c`. `CLAUDE_CODE_MESSAGING_SOCKET`/`_TOKEN` and `CLAUDE_PID` matter beyond hygiene: the socket stays *live* across the boundary (it sits under the bind-mounted `/tmp`) and the token authenticates writes to it, handing sandboxed hooks and Bash commands a writable pointer into the **host** session's inbox, and `CLAUDE_PID` names an unrelated process once inside the PID namespace, where the Bash tool's `pkill` self-protection guard reads it.
 
 > **Settings-file blocker detection**: at startup, blaude scans `~/.claude/settings.json`, `$CLAUDE_CONFIG_DIR/settings.json`, `/etc/claude-code/managed-settings.json`, `/etc/claude-code/managed-settings.d/*.json`, and the workspace's own `.claude/settings.json` / `.claude/settings.local.json` (the key works from any scope, so a repo can disable bypass mode too; skipped under `--tmp`, where the workspace is never mounted) for `permissions.disableBypassPermissionsMode: "disable"`. That key blocks `--dangerously-skip-permissions` independently of any env var, and managed (enterprise) settings cannot be overridden by blaude. If detected, a clear warning is printed; remove the key (or change the value) to restore bypass mode.
 
@@ -268,7 +256,6 @@ All [Claude Code environment variables](https://code.claude.com/docs/en/env-vars
 | **Runtime indicators / misc** | `IS_DEMO`, `FORCE_HYPERLINK`, `USE_BUILTIN_RIPGREP`, `CCR_FORCE_BUNDLE`, `CLAUDECODE`, `AI_AGENT`, `DEBUG`, `DISABLE_COST_WARNINGS`, `CI`, `NO_COLOR`, `FORCE_COLOR` |
 | **Other LLM APIs** | `OPENAI_API_KEY`, `OPENAI_API_BASE`, `OPENAI_ORG_ID`, `AZURE_OPENAI_*`, `GOOGLE_API_KEY`, `GEMINI_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `HUGGINGFACE_API_KEY`, `HF_TOKEN`, `GROQ_API_KEY`, `TOGETHER_API_KEY`, `REPLICATE_API_TOKEN`, `PERPLEXITY_API_KEY`, `FIREWORKS_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `JINA_API_KEY`, `EXA_API_KEY` |
 | **Third-party Services** | `FEEDLY_ACCESS_TOKEN`, `RAINDROP_ACCESS_TOKEN` |
-| **claudechic** | `CLAUDECHIC_DEBUG`, `CLAUDECHIC_REMOTE_PORT`, `CHIC_PROFILE`, `CHIC_SAMPLE_THRESHOLD` |
 | **notebooklm-mcp** | `NOTEBOOKLM_COOKIES`, `NOTEBOOKLM_CSRF_TOKEN`, `NOTEBOOKLM_SESSION_ID`, `NOTEBOOKLM_MCP_*` |
 | **claude-mem** | Any variable starting with `CLAUDE_MEM_` (covered by the `CLAUDE_*` prefix match, e.g. `CLAUDE_MEM_DATA_DIR`, `CLAUDE_MEM_WORKER_PORT`) |
 | **Webhooks** | Any variable ending in `_WEBHOOK` (e.g., `SLACK_WEBHOOK`, `DISCORD_WEBHOOK`) |

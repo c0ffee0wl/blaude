@@ -272,7 +272,9 @@ while [[ $# -gt 0 ]]; do
             command_args=("$@")
             break
             ;;
-        --chic) chic_mode=true; shift ;;
+        --chic)
+            echo "Warning: --chic (claudechic) is deprecated and will be removed in a future release." >&2
+            chic_mode=true; shift ;;
         --no-clipboard) no_clipboard=true; shift ;;
         *)
             command_args+=("$1")
@@ -289,7 +291,7 @@ fi
 
 # Remote Control mode: `claude remote-control` (server mode) passes through as a
 # subcommand; the --remote-control flag was consumed above. All paths
-# set the same env mode so the GrowthBook feature-flag eligibility check can run
+# set the same env mode so the feature-flag eligibility check can run
 # (see the hardcoded env-var section below). Match the bare subcommand only in
 # position 0 to avoid false positives like `-p "remote-control"`. rc_subcommand
 # additionally selects the verbatim no-skip-permissions branch in "Build command".
@@ -299,8 +301,9 @@ if [[ "${command_args[0]:-}" == "remote-control" ]]; then
 fi
 
 if [[ "$remote_control_mode" == true ]]; then
-    echo "Note: Remote Control mode — enabling telemetry + GrowthBook feature-flag fetching for" >&2
-    echo "  this session (required for Remote Control eligibility; off in normal sessions)." >&2
+    echo "Note: Remote Control mode — enabling feature-flag fetching for this session (required" >&2
+    echo "  for Remote Control eligibility; off in normal sessions). Telemetry stays off, which" >&2
+    echo "  Remote Control rejects if your organization requires Trusted Devices." >&2
     if [[ -n "${ANTHROPIC_API_KEY:-}" || -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
         echo "  Note: ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN block Remote Control (needs claude.ai" >&2
         echo "  OAuth) — forcing them unset inside the sandbox; claude will use your /login session." >&2
@@ -396,15 +399,15 @@ merge_config_flags "$config_dir/.claude.json"
 # No 2>/dev/null on $(< file): that breaks the bash file-read optimization and
 # silently returns empty. Existence + readability check is sufficient.
 _disable_re='"disableBypassPermissionsMode"[[:space:]]*:[[:space:]]*"disable"'
-_settings_files=("$config_dir/settings.json" /etc/claude-code/managed-settings.json)
+# Managed settings: the file plus the managed-settings.d/ drop-ins (Claude Code
+# 2.1.83+; fragments merge alphabetically). Also read by
+# _mount_managed_config_paths. An unmatched glob stays literal; both consumers
+# test -f.
+_managed_settings_files=(/etc/claude-code/managed-settings.json
+                         /etc/claude-code/managed-settings.d/*.json)
+_settings_files=("$config_dir/settings.json" "${_managed_settings_files[@]}")
 [[ "$config_dir/settings.json" != "$HOME/.claude/settings.json" ]] && \
     _settings_files+=("$HOME/.claude/settings.json")
-# managed-settings.d/ drop-in directory (Claude Code 2.1.83+); fragments merge alphabetically.
-if [[ -d /etc/claude-code/managed-settings.d ]]; then
-    for _f in /etc/claude-code/managed-settings.d/*.json; do
-        [[ -f "$_f" ]] && _settings_files+=("$_f")
-    done
-fi
 # Project scope completes the chain (managed -> user -> project -> local): the key
 # is documented as working from any scope, so a repo's own settings can disable
 # bypass mode too. Read from the host path ($current_dir) — $workspace is the
@@ -425,7 +428,7 @@ for _settings_file in "${_settings_files[@]}"; do
     fi
     break  # one warning is enough
 done
-unset _disable_re _settings_files _settings_file _f
+unset _disable_re _settings_files _settings_file
 
 # Same problem from the env direction: restricted mode (Claude Code 2.1.248+)
 # refuses bypassPermissions outright. It rides the CLAUDE_* prefix passthrough,
@@ -782,11 +785,13 @@ _mount_opt_frontend_tools() {
     local real dir
     local -A seen=()
     local -a bins=()
-    # Two forks total (command -v prints one line per *found* tool; readlink
-    # batch-resolves them) instead of up to two forks per listed tool.
-    mapfile -t bins < <(command -v pwsh pwsh-preview \
-        google-chrome google-chrome-stable chromium chromium-browser \
-        microsoft-edge microsoft-edge-stable brave-browser dotnet 2>/dev/null)
+    local n
+    # One fork total: `hash` + BASH_CMDS finds each tool with no subshell (as for
+    # bwrap at the top), and readlink batch-resolves the hits.
+    for n in pwsh pwsh-preview google-chrome google-chrome-stable chromium \
+             chromium-browser microsoft-edge microsoft-edge-stable brave-browser dotnet; do
+        hash "$n" 2>/dev/null && bins+=("${BASH_CMDS[$n]}")
+    done
     ((${#bins[@]})) || return 0
     while IFS= read -r -d '' real; do
         # Require >=2 levels under /opt (/opt/<vendor>/<bin>...) so stripping the
@@ -1084,6 +1089,8 @@ _bind_env_path() { _bind_if_exists "${!1:-}" "$2" "$3"; }
 
 # Add --setenv VAR=<host value> to bwrap_args iff VAR is set and non-empty.
 _setenv_if_set() { [[ -n "${!1:-}" ]] && bwrap_args+=(--setenv "$1" "${!1}"); }
+# Emit --setenv for each KEY=VALUE argument.
+_setenv_pairs() { local kv; for kv; do bwrap_args+=(--setenv "${kv%%=*}" "${kv#*=}"); done; }
 
 # Git mode: mount git config, GPG agent socket dir, and pass GitHub tokens
 if [[ "$git_mode" == true ]]; then
@@ -1200,7 +1207,31 @@ _root_owned() {
     [[ "$owner" == 0 ]] && (( (8#$perm & 022) == 0 ))
 }
 
-# Same failure as the two binds above, from the other direction: enterprise
+# Gate and ro-bind one managed directory. Called from _mount_managed_config_paths
+# and relies on bash's dynamic scoping for its caller's `seen` dedup map.
+_bind_managed_dir() {
+    local dir="$1"
+    # >=2 components (/a/b), mirroring the /opt/*/* guard on the front-end
+    # tools: stripping a basename must never collapse to /, /opt or /home
+    # and bind the lot.
+    case "$dir" in /*/*) ;; *) return ;; esac
+    # Already ro-bound wholesale far above, so binding again would cost a
+    # stat fork and a redundant mount. Deliberately excludes /var and /opt:
+    # /var is a tmpfs here and /opt is the empty --dir these binds exist
+    # to work around, so both genuinely need the bind.
+    case "$dir" in /usr/*|/etc/*|/bin/*|/sbin/*|/lib*/*) return ;; esac
+    [[ -n "${seen[$dir]:-}" ]] && return
+    seen[$dir]=1
+    if _root_owned "$dir"; then
+        _bind_if_exists "$dir" d ro-bind
+    else
+        echo "Warning: not mounting managed path $dir — it must be root-owned and" >&2
+        echo "  not group/world-writable. Have an admin chown root:root and chmod" >&2
+        echo "  go-w it; until then that hook, helper or mod does not run in the sandbox." >&2
+    fi
+}
+
+# Same failure as the SHELL_PREFIX/PROCESS_WRAPPER binds above, from the other direction: enterprise
 # settings in /etc/claude-code name host executables, and blaude hides them. The
 # sharpest is the PreToolUse hook — on a managed box it is the only enforcement
 # layer that survives --dangerously-skip-permissions, which blaude always passes
@@ -1213,10 +1244,15 @@ _root_owned() {
 # fails hardest: Claude Code runs it before the first prompt and *refuses to
 # start* without it, so blaude does not launch at all. The
 # sandbox.{bwrapPath,socatPath,ripgrep.command} binaries are the same shape (the
-# docs' own examples put them under /opt/admin).
+# docs' own examples put them under /opt/admin). So is an organization's mod: it
+# only counts as the org's when loaded *in place* from a "directory" marketplace
+# that extraKnownMarketplaces names by absolute path (docs example:
+# /opt/acme/claude-plugins). Hidden, the policy mod silently never loads — the
+# same lost enforcement as a dangling PreToolUse hook. A marketplace's
+# source.headersHelper is a command, so it is read too.
 #
 # Bind the directory holding each script, not the bare file, so a helper that
-# sources a sibling still resolves. (The two binds above take the opposite call
+# sources a sibling still resolves. (The SHELL_PREFIX/PROCESS_WRAPPER binds take the opposite call
 # deliberately — a wrapper in ~/bin would drag in the whole dir.)
 #
 # Only these enumerated command-valued keys are read, never the whole document: a
@@ -1236,11 +1272,10 @@ _root_owned() {
 # The per-directory gate doubles as the $HOME guard: anything under $HOME is
 # user-owned, so it can never be bound this way.
 _mount_managed_config_paths() {
-    local f cmd tok dir
+    local f line tok
     local -A seen=()
     local -a files=() toks=()
-    for f in /etc/claude-code/managed-settings.json \
-             /etc/claude-code/managed-settings.d/*.json; do
+    for f in "${_managed_settings_files[@]}"; do
         [[ -f "$f" && -r "$f" ]] && _root_owned "$f" && files+=("$f")
     done
     # Also guards the jq call below: with no file operands jq would read stdin,
@@ -1252,42 +1287,37 @@ _mount_managed_config_paths() {
         echo "  inside the sandbox. Install jq to restore them." >&2
         return
     }
-    while IFS= read -r cmd; do
-        # read -ra rather than unquoted $cmd: bare word-splitting would also glob.
-        read -ra toks <<<"$cmd"
+    # jq tags each line: "c <command string>" binds the dir holding each absolute
+    # token; "d <directory>" binds that directory itself, untokenized, so a path
+    # with spaces survives.
+    while IFS= read -r line; do
+        if [[ "$line" == "d "* ]]; then
+            [[ -d "${line:2}" ]] && _bind_managed_dir "${line:2}"
+            continue
+        fi
+        # read -ra rather than unquoted expansion: bare word-splitting would also glob.
+        read -ra toks <<<"${line:2}"
         for tok in "${toks[@]}"; do
             tok="${tok#[\"\']}"; tok="${tok%[\"\']}"
-            [[ "$tok" == /* && -e "$tok" ]] || continue
-            dir="${tok%/*}"
-            # >=2 components (/a/b), mirroring the /opt/*/* guard on the front-end
-            # tools: stripping a basename must never collapse to /, /opt or /home
-            # and bind the lot.
-            case "$dir" in /*/*) ;; *) continue ;; esac
-            # Already ro-bound wholesale far above, so binding again would cost a
-            # stat fork and a redundant mount. Deliberately excludes /var and /opt:
-            # /var is a tmpfs here and /opt is the empty --dir this function exists
-            # to work around, so both genuinely need the bind.
-            case "$dir" in /usr/*|/etc/*|/bin/*|/sbin/*|/lib*/*) continue ;; esac
-            [[ -n "${seen[$dir]:-}" ]] && continue
-            seen[$dir]=1
-            if _root_owned "$dir"; then
-                _bind_if_exists "$dir" d ro-bind
-            else
-                echo "Warning: not mounting managed path $dir — it must be root-owned and" >&2
-                echo "  not group/world-writable. Have an admin chown root:root and chmod" >&2
-                echo "  go-w it; until then that hook or helper does not run in the sandbox." >&2
-            fi
+            # Relative tokens die in _bind_managed_dir's /*/* guard.
+            [[ -e "$tok" ]] && _bind_managed_dir "${tok%/*}"
         done
     # Every access is `?`-guarded: an unexpected shape (a legacy string
     # statusLine, a top-level array) would otherwise abort jq mid-run and
     # silently drop the *remaining* files' paths along with it.
     # sandbox.ripgrep.args is arguments, not an executable — not read.
-    done < <(jq -r '[ (.hooks? | .. | objects | .command?),
-                      .statusLine?.command?, .apiKeyHelper?,
-                      .awsCredentialExport?, .awsAuthRefresh?,
-                      .otelHeadersHelper?, .policyHelper?.path?,
-                      .sandbox?.bwrapPath?, .sandbox?.socatPath?,
-                      .sandbox?.ripgrep?.command? ] | .[] | strings' \
+    done < <(jq -r '[ (.extraKnownMarketplaces?, .additionalMarketplaces?)
+                      | objects | .[]? | .source? | objects ] as $mkt
+                    | ([ (.hooks? | .. | objects | .command?),
+                         .statusLine?.command?, .apiKeyHelper?,
+                         .awsCredentialExport?, .awsAuthRefresh?,
+                         .otelHeadersHelper?, .policyHelper?.path?,
+                         .sandbox?.bwrapPath?, .sandbox?.socatPath?,
+                         .sandbox?.ripgrep?.command?,
+                         ($mkt[] | .headersHelper?)
+                       ] | .[] | strings | "c " + .),
+                      ($mkt[] | select(.source? == "directory")
+                       | .path? | strings | "d " + .)' \
                 "${files[@]}" 2>/dev/null)
 }
 _mount_managed_config_paths
@@ -1331,9 +1361,15 @@ if [[ "$tmp_mode" == true ]]; then
 else
     # Reject $HOME as workspace (would expose entire home directory read-write).
     # Skip resolving entirely when the override is set. current_dir is $PWD,
-    # so the builtin `pwd -P` equals readlink -f without exec'ing an external.
+    # so a physical `cd -P` there equals readlink -f with no subprocess at all
+    # (even `$(pwd -P)` forks a subshell); `pwd -P` remains the fallback.
     if [[ "$allow_protected_writes" != true ]]; then
-        resolved_workspace=$(pwd -P)
+        if cd -P -- "$PWD" 2>/dev/null; then
+            # Same directory either way, so a failed return trip is harmless.
+            resolved_workspace=$PWD; cd -- "$OLDPWD" || :
+        else
+            resolved_workspace=$(pwd -P)
+        fi
         _reject_if_home "$resolved_workspace" "sandbox home directory as workspace" \
             "Use a subdirectory instead, --tmp, or --allow-protected-writes to override."
     fi
@@ -1382,12 +1418,12 @@ else
             _dbg "Skipping protection for $1 (resolves to $real, outside workspace)"
             return 1
         }
+        _protect_file() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
         if [[ "$overlay_supported" == true ]]; then
             _protect_dir() { _protected_src_ok "$1" || return; bwrap_args+=(--overlay-src "$1" --tmp-overlay "$2"); }
         else
-            _protect_dir() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
+            _protect_dir() { _protect_file "$@"; }
         fi
-        _protect_file() { _protected_src_ok "$1" || return; bwrap_args+=(--ro-bind "$1" "$2"); }
         # Protection strategy for a single gitdir: protect config + hooks/
         # individually when hooks/ exists; otherwise overlay the whole gitdir to
         # prevent hooks/ creation (also covers config).
@@ -1501,9 +1537,7 @@ fi
 
 if [[ "$keep_env_mode" != true ]]; then
     bwrap_args+=(--clearenv)
-    bwrap_args+=(--setenv HOME "$HOME")
-    bwrap_args+=(--setenv USER "${USER:-${LOGNAME:-root}}")
-    bwrap_args+=(--setenv TERM "${TERM:-xterm-256color}")
+    _setenv_pairs "HOME=$HOME" "USER=${USER:-${LOGNAME:-root}}" "TERM=${TERM:-xterm-256color}"
     _setenv_if_set COLORTERM
 fi
 # XDG_RUNTIME_DIR, PATH, GOPATH, CARGO_HOME, NVM_DIR/NPM_CONFIG_PREFIX below are set
@@ -1551,18 +1585,16 @@ if [[ "$fnm_installed" == true ]]; then
     # Trust only a path that resolves to a real dir inside the mounted $FNM_DIR; drop it otherwise.
     [[ -n "$fnm_node_bin" && ! ( "$fnm_node_bin" == "$fnm_dir"/* && -d "$fnm_node_bin" ) ]] && fnm_node_bin=""
 fi
-# Front-load the active manager's node bin; append the inactive one as a fallback.
+# Front-load the active manager's node bin (fnm wins if both are active); append
+# the other, or both when neither is active in this shell, as a fallback.
+_node_bins=("$fnm_node_bin" "$nvm_node_bin")
 if [[ -n "${FNM_MULTISHELL_PATH:-}" && -n "$fnm_node_bin" ]]; then
-    sandbox_path="$fnm_node_bin:$sandbox_path"
-    [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
+    sandbox_path="$fnm_node_bin:$sandbox_path"; _node_bins=("$nvm_node_bin")
 elif [[ -n "${NVM_BIN:-}" && -n "$nvm_node_bin" ]]; then
-    sandbox_path="$nvm_node_bin:$sandbox_path"
-    [[ -n "$fnm_node_bin" ]] && sandbox_path="$sandbox_path:$fnm_node_bin"
-else
-    # No manager active in this shell — append whatever is installed (fallback only).
-    [[ -n "$fnm_node_bin" ]] && sandbox_path="$sandbox_path:$fnm_node_bin"
-    [[ -n "$nvm_node_bin" ]] && sandbox_path="$sandbox_path:$nvm_node_bin"
+    sandbox_path="$nvm_node_bin:$sandbox_path"; _node_bins=("$fnm_node_bin")
 fi
+for _b in "${_node_bins[@]}"; do [[ -n "$_b" ]] && sandbox_path="$sandbox_path:$_b"; done
+unset _node_bins _b
 # fnm binary itself (curl install lives at $FNM_DIR/fnm) + secondary PM bins. None of
 # these provide `node`, so their order doesn't affect node resolution.
 [[ "$fnm_installed" == true && -x "$fnm_dir/fnm" ]] && sandbox_path="$sandbox_path:$fnm_dir"
@@ -1571,8 +1603,7 @@ fi
 sandbox_path="$sandbox_path:/usr/local/bin:/usr/bin:/bin:/sbin:/usr/sbin"
 bwrap_args+=(--setenv PATH "$sandbox_path")
 # Package manager environment variables
-bwrap_args+=(--setenv GOPATH "$HOME/go")
-bwrap_args+=(--setenv CARGO_HOME "$HOME/.cargo")
+_setenv_pairs "GOPATH=$HOME/go" "CARGO_HOME=$HOME/.cargo"
 # NVM/fnm manage their own npm prefix (inside the version install); only set
 # NPM_CONFIG_PREFIX when neither is in use.
 [[ "$nvm_installed" == true ]] && bwrap_args+=(--setenv NVM_DIR "$nvm_dir")
@@ -1599,14 +1630,13 @@ _hardcoded_env_vars=(
     DISABLE_AUTOUPDATER=1 DISABLE_ERROR_REPORTING=1
     DISABLE_BUG_COMMAND=1 CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1
     DISABLE_INSTALL_GITHUB_APP_COMMAND=1 CLAUDE_DISABLE_CONFIG_WATCH=1
+    # Privacy opt-outs, kept even in Remote Control mode: since 2.1.283 RC works
+    # with them set, unless the organization requires Trusted Devices.
+    DO_NOT_TRACK=1 DISABLE_TELEMETRY=1
 )
-# Telemetry + GrowthBook opt-outs disable the feature-flag layer that gates Remote
-# Control eligibility, so they MUST be absent in Remote Control mode (forced unset
-# below). Privacy default keeps them on for every normal session.
-[[ "$remote_control_mode" != true ]] && \
-    _hardcoded_env_vars+=(DO_NOT_TRACK=1 DISABLE_TELEMETRY=1 DISABLE_GROWTHBOOK=1)
-# Emit --setenv for each KEY=VALUE argument (also used for --env below).
-_setenv_pairs() { local kv; for kv; do bwrap_args+=(--setenv "${kv%%=*}" "${kv#*=}"); done; }
+# DISABLE_GROWTHBOOK disables the feature-flag layer that gates Remote Control
+# eligibility, so it MUST be absent in Remote Control mode (forced unset below).
+[[ "$remote_control_mode" != true ]] && _hardcoded_env_vars+=(DISABLE_GROWTHBOOK=1)
 _setenv_pairs "${_hardcoded_env_vars[@]}"
 
 # Hardcoded env-var unsets — forced absent regardless of host env.
@@ -1648,8 +1678,9 @@ _hardcoded_unsetenv_vars=(
     CLAUDE_CODE_MESSAGING_SOCKET CLAUDE_CODE_MESSAGING_TOKEN CLAUDE_PID
     CLAUDE_JOB_DIR
 )
-# Remote Control mode: force the telemetry/feature-flag opt-outs absent (so the
-# GrowthBook eligibility check can run) plus the auth vars that block RC — it needs
+# Remote Control mode: force the two feature-flag kill switches absent (so the
+# eligibility check can run; CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC would otherwise
+# ride the CLAUDE_* prefix in) plus the auth vars that block RC — it needs
 # a full-scope claude.ai OAuth session, so a host ANTHROPIC_API_KEY or limited-scope
 # CLAUDE_CODE_OAUTH_TOKEN must not reach the sandbox (either triggers the misleading
 # "Remote Control is not yet enabled" error). Listing them here also enters them
@@ -1657,7 +1688,7 @@ _hardcoded_unsetenv_vars=(
 # ANTHROPIC_*/CLAUDE_* prefix match can't re-pass them.
 if [[ "$remote_control_mode" == true ]]; then
     _hardcoded_unsetenv_vars+=(
-        DO_NOT_TRACK DISABLE_TELEMETRY DISABLE_GROWTHBOOK
+        DISABLE_GROWTHBOOK CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
         ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN
     )
 fi
@@ -1920,9 +1951,9 @@ if [[ "$no_clipboard" != true ]]; then
 fi
 if [[ -n "$_clipboard_cmd" ]]; then
     _dbg "Clipboard proxy: $_clipboard_cmd"
-    final_cmd=("$_clipboard_cmd" bwrap "${bwrap_args[@]}")
+    final_cmd=("$_clipboard_cmd" "$_bwrap_bin" "${bwrap_args[@]}")
 else
-    final_cmd=(bwrap "${bwrap_args[@]}")
+    final_cmd=("$_bwrap_bin" "${bwrap_args[@]}")
 fi
 
 # Detect AppArmor user namespace restriction (Ubuntu 24.04+).

@@ -77,15 +77,9 @@ class _OSC52Scanner:
         self.clip_cmd = clip_cmd
 
     def feed(self, data):
-        # Fast path: PASSTHROUGH chunks with no ESC byte (vast majority of terminal output).
-        # Avoid the data[idx:] slice copy — pass the starting offset directly.
-        if self.state == _PASSTHROUGH:
-            idx = data.find(0x1B)
-            if idx == -1:
-                return
-            self._scan(data, idx)
-        else:
-            self._scan(data, 0)
+        # No separate fast path: _scan's PASSTHROUGH branch already skips a
+        # chunk with no OSC introducer in one C-level find.
+        self._scan(data, 0)
 
     def _scan(self, data, i):
         # Localise hot attributes: Python attribute lookups are relatively expensive
@@ -129,14 +123,18 @@ class _OSC52Scanner:
                 continue
 
             # Plain output is the common case and is dense with ESC (colour and
-            # cursor codes), so skip to the next ESC at C level too rather than
-            # stepping byte by byte.
+            # cursor codes), so skip straight to the next OSC introducer (ESC ])
+            # at C level instead of stopping at every ESC.
             if state == _PASSTHROUGH:
-                i = data.find(0x1B, i)
-                if i == -1:
+                j = data.find(b"\x1b]", i)
+                if j == -1:
+                    # A trailing ESC may begin an OSC split across reads.
+                    if data[n - 1] == 0x1B:
+                        state = _SAW_ESC
                     break
-                i += 1
-                state = _SAW_ESC
+                i = j + 2
+                state = _IN_OSC
+                buf.clear()
                 continue
 
             b = data[i]
@@ -145,7 +143,7 @@ class _OSC52Scanner:
                 if b == 0x5D:  # ']'
                     state = _IN_OSC
                     buf.clear()
-                else:
+                elif b != 0x1B:  # a repeated ESC may still introduce the OSC
                     state = _PASSTHROUGH
             elif state == _IN_OSC:
                 buf.append(b)
@@ -178,6 +176,16 @@ class _OSC52Scanner:
         self.state = state
 
 
+def _exec(argv):
+    """execvp, or exit 127. os._exit, not sys.exit: this also runs in the
+    pty.fork child, which must never unwind into the parent's code."""
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as e:
+        print(f"osc52-clipboard: exec failed: {e}", file=sys.stderr, flush=True)
+        os._exit(127)
+
+
 # --- PTY proxy with SIGWINCH support ---
 
 
@@ -186,11 +194,7 @@ def _proxy(argv, master_read):
     Returns the child's exit code."""
     child_pid, master_fd = pty.fork()
     if child_pid == 0:
-        try:
-            os.execvp(argv[0], argv)
-        except OSError as e:
-            print(f"osc52-clipboard: exec failed: {e}", file=sys.stderr)
-            os._exit(127)
+        _exec(argv)
 
     try:
         real_stdin = sys.stdin.fileno()
@@ -266,21 +270,13 @@ def _proxy(argv, master_read):
 
 # --- Main ---
 
-def _exec_bypass():
-    try:
-        os.execvp(sys.argv[1], sys.argv[1:])
-    except OSError as e:
-        print(f"osc52-clipboard: exec failed: {e}", file=sys.stderr)
-        sys.exit(127)
-
-
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <command> [args...]", file=sys.stderr)
         sys.exit(1)
 
     if os.environ.get("OSC52_NO_CLIPBOARD") == "1":
-        _exec_bypass()
+        _exec(sys.argv[1:])
 
     clip_cmd = _detect_clipboard()
     if clip_cmd is None:
@@ -288,7 +284,7 @@ def main():
         # disk, so a missing clipboard tool is the norm on headless systems.
         if _OSC52_DEBUG:
             print("osc52-clipboard: no clipboard tool found (need xclip, xsel, or wl-copy)", file=sys.stderr)
-        _exec_bypass()
+        _exec(sys.argv[1:])
 
     scanner = _OSC52Scanner(clip_cmd)
 

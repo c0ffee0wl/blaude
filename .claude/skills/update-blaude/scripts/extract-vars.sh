@@ -8,8 +8,9 @@ set -euo pipefail
 BLAUDE="${1:-blaude}"
 
 echo "=== HARDCODED (forced via _hardcoded_env_vars KEY=VALUE pairs) ==="
-# Stored as KEY=VALUE pairs since the SCRUB=0 fix; extract the KEY part only.
-sed -n '/^_hardcoded_env_vars=(/,/^)/p' "$BLAUDE" \
+# Stored as KEY=VALUE pairs; extract the KEY part only. Reads the conditional
+# `+=` lines too (DISABLE_GROWTHBOOK is appended outside Remote Control mode).
+awk '/_hardcoded_env_vars\+?=\(/{f=1} f{print} f&&/\)/{f=0}' "$BLAUDE" \
   | grep -v '^\s*#' \
   | grep -oE '[A-Z_][A-Z0-9_]*=' \
   | tr -d '=' \
@@ -63,6 +64,6 @@ echo "=== MANAGED COMMAND KEYS (jq in _mount_managed_config_paths) ==="
 # ro-bound. Prints the jq key paths with the `?` guards stripped, e.g.
 # `.policyHelper.path`; `(.hooks | .. | objects | .command)` covers every hook
 # event. Diff against the settings reference's executable-valued keys.
-sed -n "/^_mount_managed_config_paths()/,/^}/{/jq -r '\[/,/\] | \.\[\]/{s/?//g;p}}" "$BLAUDE" \
+sed -n "/^_mount_managed_config_paths()/,/^}/{/jq -r '\[/,/files\[@\]/{s/?//g;p}}" "$BLAUDE" \
   | grep -oE '\(\.hooks[^)]*\)|\.[A-Za-z][A-Za-z0-9_.]*' \
   | sort -u

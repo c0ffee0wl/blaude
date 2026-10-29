@@ -4,9 +4,9 @@ These vars are set unconditionally via `--setenv` in the `_hardcoded_env_vars` a
 
 | Variable | Value | Rationale |
 |---|---|---|
-| `DO_NOT_TRACK` | `1` | Privacy: universal opt-out signal (de facto standard). **RC-conditional** — appended only when not in Remote Control mode (RC needs GrowthBook; force-unset there instead) |
-| `DISABLE_TELEMETRY` | `1` | Privacy: no telemetry from sandbox. **RC-conditional** (same as above) |
-| `DISABLE_GROWTHBOOK` | `1` | Privacy: no feature-flag fetches. **RC-conditional** (same as above) |
+| `DO_NOT_TRACK` | `1` | Privacy: universal opt-out signal (de facto standard). Kept in Remote Control mode too (RC accepts it since 2.1.283 unless the org requires Trusted Devices) |
+| `DISABLE_TELEMETRY` | `1` | Privacy: no telemetry from sandbox. Kept in RC mode (same as above) |
+| `DISABLE_GROWTHBOOK` | `1` | Privacy: no feature-flag fetches. **RC-conditional** — appended only when not in Remote Control mode (RC needs the fetch; force-unset there instead) |
 | `DISABLE_AUTOUPDATER` | `1` | System dirs are read-only; updates would fail |
 | `DISABLE_ERROR_REPORTING` | `1` | Privacy: no error reporting from sandbox |
 | `DISABLE_BUG_COMMAND` | `1` | Bug reporting not useful inside sandbox |
@@ -20,7 +20,7 @@ Forced absent via `--unsetenv` and included in the same passthrough deny-set. Re
 
 - `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB` — the hardening predicate fires whenever the var is *defined* (even `=0`), overriding `--dangerously-skip-permissions` (symptom: `Permission mode forced to default — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set …`). blaude matches the documented default of "unset = disabled". It was previously hardcoded `=0` in `_hardcoded_env_vars`; that did NOT suppress the banner, hence the move to force-unset.
 - `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_CODE_EXECPATH`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_BRIDGE_SESSION_ID`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_TEAM_NAME`, `CLAUDE_CODE_REMOTE`, `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_EFFORT`, `CLAUDE_PROJECT_DIR`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDE_PID`, `CLAUDE_JOB_DIR` — markers an outer claude sets automatically; unset so a nested blaude launch starts the inner claude with clean identity. If the docs add a new "Set automatically in subprocesses" marker var, recommend adding it here.
-- In Remote Control mode only: `DO_NOT_TRACK`, `DISABLE_TELEMETRY`, `DISABLE_GROWTHBOOK`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`.
+- In Remote Control mode only: `DISABLE_GROWTHBOOK`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`.
 
 ## Rules
 

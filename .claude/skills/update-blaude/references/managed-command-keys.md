@@ -14,6 +14,8 @@
 | `.policyHelper.path` | absolute path | Managed only | **Claude Code refuses to start.** Sharpest of the set |
 | `.sandbox.bwrapPath`, `.sandbox.socatPath` | absolute path | Managed only | Claude Code's own sandbox fails its dependency check / network proxy |
 | `.sandbox.ripgrep.command` | absolute path (object with optional `args`) | User or managed | Sandboxed search tools lose ripgrep. `args` is not read |
+| `(.extraKnownMarketplaces, .additionalMarketplaces)[].source` → `.path` when `.source == "directory"` | absolute **directory** path (jq emits it as a `d `-tagged line; bound itself, untokenized) | User or managed | The org's mods (loaded in place; e.g. a `prependPlugins` policy mod) never load — lost enforcement |
+| same `.source.headersHelper` | command string | User or managed | Authenticated marketplace fetch fails |
 
 ## Classifying a candidate from the settings reference
 
