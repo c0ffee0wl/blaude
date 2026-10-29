@@ -8,8 +8,12 @@
 |---|---|---|---|
 | `(.hooks \| .. \| objects \| .command)` | command string | any | Non-blocking hook error on every tool call; the hook enforces nothing. Recursive over the hooks subtree, so new hook events need no change |
 | `.statusLine.command` | command string | any | Status line blank |
+| `.fileSuggestion.command` | command string | any | `@` autocomplete returns nothing |
+| `.subagentStatusLine.command` | command string | any | Subagent rows fall back to the default rendering |
 | `.apiKeyHelper` | command string | any | No credential at all |
 | `.awsCredentialExport`, `.awsAuthRefresh` | command string | any | Bedrock auth fails |
+| `.gcpAuthRefresh` | command string | any | Vertex/Agent Platform auth refresh fails once ADC expire |
+| `.processWrapper` | argv prefix (first absolute token is the launcher) | User or managed | Background processes fail to start through the corporate launcher |
 | `.otelHeadersHelper` | command string | any | OTEL export loses its dynamic headers |
 | `.policyHelper.path` | absolute path | Managed only | **Claude Code refuses to start.** Sharpest of the set |
 | `.sandbox.bwrapPath`, `.sandbox.socatPath` | absolute path | Managed only | Claude Code's own sandbox fails its dependency check / network proxy |

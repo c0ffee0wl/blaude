@@ -76,11 +76,13 @@ Report both version numbers in the summary line.
 
 #### 2c. Settings reference — executable-valued keys
 
-Filter the settings-reference index for keys whose value is a program Claude Code runs, and diff against the `MANAGED COMMAND KEYS` section of `blaude-extract.txt`:
+Filter the settings reference for keys whose value is a program Claude Code runs, and diff against the `MANAGED COMMAND KEYS` section of `blaude-extract.txt`. Match each key section's `* **Type**:` line (the value's shape), not the index summary — summaries are prose and phrase the same thing many ways, so a keyword list over them keeps missing keys:
 
 ```bash
-awk -F'|' '/^\| \[`/ && tolower($2 $3) ~ /executable|helper|command to|script|binary|program|path to/ {print $2 "|" $3}' settings-ref.md
+awk '/^### `/{k=$2} /^\* \*\*Type\*\*:/ && tolower($0) ~ /"command"|command line|argv prefix|executable|absolute path|binary/ {print k " :: " substr($0,1,110)}' settings-ref.md
 ```
+
+Known non-executable hits: `claudeMdExcludes`, `worktree.location`. Helpers documented only in prose (no `### key` section) are missed — also scan the precedence table's "Read from the highest-priority source only" row for `*Helper` names.
 
 Classify each candidate not in the baseline per [managed-command-keys.md](references/managed-command-keys.md).
 

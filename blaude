@@ -1192,7 +1192,8 @@ fi
 # server startup, so a dangling path breaks all four. PROCESS_WRAPPER (2.1.208) is
 # canonically under /opt, which blaude builds as an empty --dir — it dangles just
 # like the /usr/bin -> /opt front-end symlinks handled above; its documented home is
-# the settings env block, so a shell export (bound here) is the uncommon case.
+# a settings key (processWrapper) or env block, so a shell export (bound here) is
+# the uncommon case; the managed key is bound by _mount_managed_config_paths.
 # Only the executable is bound, not its parent dir: over-broad for a wrapper in
 # ~/bin, and a launcher needing sibling files can be exposed with -m.
 _bind_if_exists "${CLAUDE_CODE_SHELL_PREFIX%%[[:space:]]*}" f ro-bind
@@ -1249,7 +1250,12 @@ _bind_managed_dir() {
 # that extraKnownMarketplaces names by absolute path (docs example:
 # /opt/acme/claude-plugins). Hidden, the policy mod silently never loads — the
 # same lost enforcement as a dangling PreToolUse hook. A marketplace's
-# source.headersHelper is a command, so it is read too.
+# source.headersHelper is a command, so it is read too, as is the
+# processWrapper settings key (the managed form of CLAUDE_CODE_PROCESS_WRAPPER
+# above; its argv prefix goes through the same token loop). statusLine,
+# fileSuggestion and subagentStatusLine commands only lose UI when dangling
+# (blank status line, empty @-autocomplete, default subagent rows), but a
+# managed admin set them, so they are bound the same way.
 #
 # Bind the directory holding each script, not the bare file, so a helper that
 # sources a sibling still resolves. (The SHELL_PREFIX/PROCESS_WRAPPER binds take the opposite call
@@ -1309,8 +1315,10 @@ _mount_managed_config_paths() {
     done < <(jq -r '[ (.extraKnownMarketplaces?, .additionalMarketplaces?)
                       | objects | .[]? | .source? | objects ] as $mkt
                     | ([ (.hooks? | .. | objects | .command?),
-                         .statusLine?.command?, .apiKeyHelper?,
+                         .statusLine?.command?, .fileSuggestion?.command?,
+                         .subagentStatusLine?.command?, .apiKeyHelper?,
                          .awsCredentialExport?, .awsAuthRefresh?,
+                         .gcpAuthRefresh?, .processWrapper?,
                          .otelHeadersHelper?, .policyHelper?.path?,
                          .sandbox?.bwrapPath?, .sandbox?.socatPath?,
                          .sandbox?.ripgrep?.command?,
